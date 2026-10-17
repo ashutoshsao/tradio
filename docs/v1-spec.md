@@ -112,7 +112,7 @@ Every EQ row is stored (~2,700/day, ~1.3M rows for 2 years), which is cheap and 
 
 ## 6. Daily run
 
-Scheduled every 15 min from 18:00 to 22:00 IST, every day. Each tick is idempotent:
+Scheduled every 15 min from 18:00 to 22:00 IST, every day, plus once when the bot starts (to catch up after the laptop was off). Each tick is idempotent:
 
 1. Find dates after the last ingested date up to today. Fetch each bhavcopy and its `bc` file. 404 → skip (non-trading day or not yet published). Then query the actions API for the last 14 days.
    This also catches up automatically if the laptop was off for some days.
@@ -121,6 +121,7 @@ Scheduled every 15 min from 18:00 to 22:00 IST, every day. Each tick is idempote
 4. Send pending deliveries: **one digest message per user** with all their events. Mark sent/failed; failed ones retry on the next tick.
 5. Catch-up events older than 5 trading days are marked skipped, not sent.
 6. At 22:00 on a weekday with no bhavcopy for today: notify admin ("no bhavcopy for <date>: holiday or NSE delay").
+7. If a tick throws, the admin is told once per day and the next tick retries. Users who blocked the bot have their deliveries marked skipped.
 
 ## 7. Telegram bot
 

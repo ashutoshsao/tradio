@@ -50,7 +50,7 @@ def store_actions(session: Session, actions: list[CorporateAction]) -> int:
     for a in actions:
         factor = a.factor if a.factor is not None else ex_date_gap(session, a.symbol, a.ex_date)
         if factor is None:
-            log.info("%s %s %s: no prices around the ex-date yet, skipped", a.ex_date, a.symbol, a.action)
+            log.debug("%s %s %s: no prices around the ex-date yet, skipped", a.ex_date, a.symbol, a.action)
             continue
         rows[(a.symbol, a.ex_date, a.action)] = {
             "symbol": a.symbol,

@@ -7,6 +7,7 @@ import asyncio
 import functools
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
 from telegram import (
@@ -28,9 +29,10 @@ from telegram.ext import (
     filters,
 )
 
-from tradio import messages
+from tradio import daily, messages
 from tradio import watchlist as wl
 from tradio.config import get_settings
+from tradio.data.nse import NseArchiveSource
 from tradio.db import session
 from tradio.engine import evaluate
 from tradio.models import User, WatchlistEntry
@@ -280,6 +282,22 @@ COMMANDS = [
 
 async def _post_init(app: Application) -> None:
     await app.bot.set_my_commands([BotCommand(c, d) for c, d in COMMANDS])
+    # Catch up once at startup (e.g. after the laptop was off), then every 15 minutes;
+    # ticks outside the evening window are skipped.
+    app.job_queue.run_once(_daily_tick, when=5, data={"force": True})
+    now = datetime.now(daily.IST)
+    next_quarter = (now + timedelta(minutes=15 - now.minute % 15)).replace(second=0, microsecond=0)
+    app.job_queue.run_repeating(_daily_tick, interval=timedelta(minutes=15), first=next_quarter)
+
+
+async def _daily_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
+    now = datetime.now(daily.IST)
+    if not (context.job.data or {}).get("force") and not daily.in_window(now):
+        return
+    try:
+        await daily.tick(context.bot, NseArchiveSource(), now, get_settings().admin_telegram_id)
+    except Exception:
+        pass  # logged and reported to the admin inside tick; the next tick retries
 
 
 def build_application() -> Application:

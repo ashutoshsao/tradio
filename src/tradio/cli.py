@@ -56,6 +56,27 @@ def backtest(args: argparse.Namespace) -> None:
         print(bt.detail(s, [x.upper() for x in args.symbols], args.last) if args.symbols else bt.summary(s))
 
 
+def run_daily(_: argparse.Namespace) -> None:
+    import asyncio
+    from datetime import datetime
+
+    from telegram import Bot
+
+    from tradio import daily
+    from tradio.config import get_settings
+    from tradio.data.nse import NseArchiveSource
+
+    settings = get_settings()
+    if settings.telegram_bot_token is None:
+        raise SystemExit("TELEGRAM_BOT_TOKEN is not set (see .env.example)")
+
+    async def go():
+        async with Bot(settings.telegram_bot_token.get_secret_value()) as tg:
+            await daily.tick(tg, NseArchiveSource(), datetime.now(daily.IST), settings.admin_telegram_id)
+
+    asyncio.run(go())
+
+
 def bot(_: argparse.Namespace) -> None:
     from tradio.bot import run
 
@@ -87,7 +108,8 @@ def main() -> None:
     bt.add_argument("--last", type=int, default=10, help="events to show per stock (default 10)")
     bt.set_defaults(func=backtest)
 
-    sub.add_parser("bot", help="run the Telegram bot").set_defaults(func=bot)
+    sub.add_parser("bot", help="run the Telegram bot (includes the evening run)").set_defaults(func=bot)
+    sub.add_parser("run-daily", help="one evening-run tick: load data, find crosses, send alerts").set_defaults(func=run_daily)
 
     args = parser.parse_args()
     args.func(args)

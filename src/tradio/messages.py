@@ -62,6 +62,17 @@ def status_line(s: StockStatus, today: date | None = None) -> str:
     return line
 
 
+def no_data(d: date) -> str:
+    return (
+        f"⚠️ No NSE bhavcopy for {day(d)} by 10 PM IST. Probably a market holiday; "
+        "if not, NSE is late and the next run will pick it up."
+    )
+
+
+def run_failed(d: date, exc: Exception) -> str:
+    return f"⚠️ Daily run for {day(d)} failed: <code>{escape(repr(exc))[:500]}</code>\nIt retries every 15 minutes until 10 PM."
+
+
 def search_results(query: str, matches) -> str:
     if not matches:
         return f"No NSE stock matches <b>{escape(query)}</b>. Try another part of the name or the symbol."
