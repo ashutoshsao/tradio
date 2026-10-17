@@ -1,0 +1,30 @@
+[project]
+name = "tradio"
+version = "0.1.0"
+description = "Telegram alerts for SMA 8/13/21 crossovers on NSE stocks"
+readme = "README.md"
+authors = [
+    { name = "ashutoshsao", email = "ashutoshsao17@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.20.0",
+    "psycopg[binary]>=3.3.6",
+    "pydantic-settings>=2.16.0",
+    "sqlalchemy>=2",
+]
+
+[project.scripts]
+tradio = "tradio.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.27,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

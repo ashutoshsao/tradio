@@ -1,0 +1,176 @@
+"""Database schema. See docs/v1-spec.md §5."""
+
+import enum
+from datetime import date, datetime
+from decimal import Decimal
+
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    Enum,
+    ForeignKey,
+    MetaData,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+Price = Numeric(12, 2)
+Sma = Numeric(14, 4)
+
+
+class Base(DeclarativeBase):
+    type_annotation_map = {datetime: DateTime(timezone=True)}
+    metadata = MetaData(
+        naming_convention={
+            "ix": "ix_%(column_0_label)s",
+            "uq": "uq_%(table_name)s_%(column_0_N_name)s",
+            "ck": "ck_%(table_name)s_%(constraint_name)s",
+            "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+            "pk": "pk_%(table_name)s",
+        }
+    )
+
+
+def _enum(cls: type[enum.Enum]) -> Enum:
+    # Stored as VARCHAR so adding a value never needs an ALTER TYPE migration.
+    return Enum(cls, native_enum=False, length=16, values_callable=lambda e: [m.value for m in e])
+
+
+class SmaState(enum.StrEnum):
+    ABOVE = "above"
+    BELOW = "below"
+    MIXED = "mixed"
+
+
+class Direction(enum.StrEnum):
+    BULLISH = "bullish"
+    BEARISH = "bearish"
+
+
+class DeliveryStatus(enum.StrEnum):
+    PENDING = "pending"
+    SENT = "sent"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class RunStatus(enum.StrEnum):
+    RUNNING = "running"
+    DONE = "done"
+    NO_DATA = "no_data"
+    FAILED = "failed"
+
+
+class Instrument(Base):
+    __tablename__ = "instruments"
+
+    symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    isin: Mapped[str] = mapped_column(String(12))
+    name: Mapped[str] = mapped_column(String(128))
+    series: Mapped[str] = mapped_column(String(4))
+    last_seen_date: Mapped[date]
+
+
+class DailyPrice(Base):
+    """Raw bhavcopy prices, never modified. Adjustments are applied on read."""
+
+    __tablename__ = "daily_prices"
+
+    symbol: Mapped[str] = mapped_column(ForeignKey("instruments.symbol"), primary_key=True)
+    trade_date: Mapped[date] = mapped_column(primary_key=True, index=True)
+    open: Mapped[Decimal] = mapped_column(Price)
+    high: Mapped[Decimal] = mapped_column(Price)
+    low: Mapped[Decimal] = mapped_column(Price)
+    close: Mapped[Decimal] = mapped_column(Price)
+    prev_close: Mapped[Decimal] = mapped_column(Price)
+    volume: Mapped[int] = mapped_column(BigInteger)
+
+
+class PriceAdjustment(Base):
+    """Split/bonus factor: prices before ex_date are multiplied by factor."""
+
+    __tablename__ = "price_adjustments"
+
+    symbol: Mapped[str] = mapped_column(ForeignKey("instruments.symbol"), primary_key=True)
+    ex_date: Mapped[date] = mapped_column(primary_key=True)
+    factor: Mapped[Decimal] = mapped_column(Numeric(16, 10))
+    detected_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    username: Mapped[str | None] = mapped_column(String(64))
+    is_admin: Mapped[bool] = mapped_column(default=False)
+    is_allowed: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class WatchlistEntry(Base):
+    __tablename__ = "watchlist"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"), primary_key=True
+    )
+    symbol: Mapped[str] = mapped_column(ForeignKey("instruments.symbol"), primary_key=True, index=True)
+    added_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class SignalState(Base):
+    __tablename__ = "signal_states"
+
+    symbol: Mapped[str] = mapped_column(ForeignKey("instruments.symbol"), primary_key=True)
+    trade_date: Mapped[date] = mapped_column(primary_key=True)
+    sma8: Mapped[Decimal] = mapped_column(Sma)
+    sma13: Mapped[Decimal] = mapped_column(Sma)
+    sma21: Mapped[Decimal] = mapped_column(Sma)
+    state: Mapped[SmaState] = mapped_column(_enum(SmaState))
+
+
+class SignalEvent(Base):
+    __tablename__ = "signal_events"
+    __table_args__ = (UniqueConstraint("symbol", "trade_date", "direction"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    symbol: Mapped[str] = mapped_column(ForeignKey("instruments.symbol"))
+    trade_date: Mapped[date] = mapped_column(index=True)
+    direction: Mapped[Direction] = mapped_column(_enum(Direction))
+    close: Mapped[Decimal] = mapped_column(Price)
+    sma8: Mapped[Decimal] = mapped_column(Sma)
+    sma13: Mapped[Decimal] = mapped_column(Sma)
+    sma21: Mapped[Decimal] = mapped_column(Sma)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class Delivery(Base):
+    __tablename__ = "deliveries"
+
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("signal_events.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"), primary_key=True
+    )
+    status: Mapped[DeliveryStatus] = mapped_column(
+        _enum(DeliveryStatus), default=DeliveryStatus.PENDING, index=True
+    )
+    attempts: Mapped[int] = mapped_column(default=0)
+    sent_at: Mapped[datetime | None]
+    error: Mapped[str | None] = mapped_column(Text)
+
+
+class Run(Base):
+    __tablename__ = "runs"
+
+    trade_date: Mapped[date] = mapped_column(primary_key=True)
+    status: Mapped[RunStatus] = mapped_column(_enum(RunStatus))
+    attempts: Mapped[int] = mapped_column(default=0)
+    started_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    finished_at: Mapped[datetime | None]
+    error: Mapped[str | None] = mapped_column(Text)
