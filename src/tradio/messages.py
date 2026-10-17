@@ -20,7 +20,8 @@ HELP = f"""<b>Tradio</b> alerts you when a stock's daily SMA8 crosses above both
 
 ADMIN_HELP = """<b>Admin</b>
 /allow ID – let a user in
-/revoke ID – remove access
+/revoke ID – block access (keeps their watchlist; /allow restores it)
+/deleteuser ID – remove the user and their watchlist
 /users – everyone who has started the bot
 /status – last data loaded"""
 

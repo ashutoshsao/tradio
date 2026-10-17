@@ -42,16 +42,25 @@ def set_allowed(session: Session, user_id: int, allowed: bool) -> User | None:
     return user
 
 
+def delete_user(session: Session, user_id: int) -> User | None:
+    """Remove a user and (via ON DELETE CASCADE) their watchlist and deliveries. Not the admin."""
+    user = session.get(User, user_id)
+    if user is None or user.is_admin:
+        return None
+    session.delete(user)
+    session.commit()
+    return user
+
+
 def list_users(session: Session) -> list[tuple[User, int]]:
     counts = func.count(WatchlistEntry.symbol)
-    return list(
-        session.execute(
-            select(User, counts)
-            .outerjoin(WatchlistEntry, WatchlistEntry.user_id == User.telegram_user_id)
-            .group_by(User.telegram_user_id)
-            .order_by(User.created_at)
-        ).tuples()
+    rows = session.execute(
+        select(User, counts)
+        .outerjoin(WatchlistEntry, WatchlistEntry.user_id == User.telegram_user_id)
+        .group_by(User.telegram_user_id)
+        .order_by(User.created_at)
     )
+    return [(user, n) for user, n in rows]
 
 
 def latest_trading_day(session: Session) -> date | None:

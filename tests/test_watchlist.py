@@ -32,6 +32,19 @@ def test_admin_is_allowed_others_wait(db):
     assert wl.set_allowed(db, 999, True) is None
 
 
+def test_delete_user_removes_watchlist_but_not_admin(db):
+    load(db, {"A": [1] * 25}, days=25)
+    wl.register(db, ADMIN, ADMIN, None, admin_id=ADMIN)
+    wl.register(db, FRIEND, FRIEND, None, admin_id=ADMIN)
+    wl.set_allowed(db, FRIEND, True)
+    wl.add_symbols(db, FRIEND, ["A"])
+
+    assert wl.delete_user(db, FRIEND) is not None
+    assert wl.watchlist(db, FRIEND) == []
+    assert [u.telegram_user_id for u, _ in wl.list_users(db)] == [ADMIN]
+    assert wl.delete_user(db, ADMIN) is None
+
+
 def test_add_shows_current_state_and_does_not_queue_past_signals(db):
     load(db, {"TCS": [100] * 25 + [110] * 5}, days=30)
     wl.register(db, ADMIN, ADMIN, None, admin_id=ADMIN)

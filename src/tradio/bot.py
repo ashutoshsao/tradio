@@ -132,6 +132,18 @@ async def revoke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @admin_only
+async def delete_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args or not context.args[0].isdigit():
+        await reply(update, "Usage: /deleteuser TELEGRAM_ID")
+        return
+    user_id = int(context.args[0])
+    if await db(wl.delete_user, user_id) is None:
+        await reply(update, "No such user, or it's the admin.")
+        return
+    await reply(update, f"Deleted <code>{user_id}</code> and their watchlist. If they /start again they'll need approval.")
+
+
+@admin_only
 async def users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await reply(update, messages.users(await db(wl.list_users)))
 
@@ -172,6 +184,7 @@ def build_application() -> Application:
         ("list", list_command),
         ("allow", allow),
         ("revoke", revoke),
+        ("deleteuser", delete_user),
         ("users", users),
         ("status", status),
     ]:
