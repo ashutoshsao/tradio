@@ -6,14 +6,16 @@ from bhavcopy_fixture import csv_text, row
 from tradio.data.nse import parse_bhavcopy_csv
 from tradio.engine import evaluate
 from tradio.ingest import store_day
-from tradio.models import Direction, SignalEvent, SignalState
+from tradio.models import Direction, SignalEvent, SignalState, TradingDay
 
 START = date(2026, 1, 1)
 
 
 def load_series(db, symbol, closes):
     for i, close in enumerate(closes):
-        store_day(db, parse_bhavcopy_csv(csv_text(row(START + timedelta(days=i), symbol, str(close)))))
+        day = START + timedelta(days=i)
+        store_day(db, parse_bhavcopy_csv(csv_text(row(day, symbol, str(close)))))
+        db.merge(TradingDay(trade_date=day, actions_loaded=True))
     db.commit()
 
 

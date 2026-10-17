@@ -13,7 +13,7 @@ Telegram alerts when a watched NSE stock's daily SMA8 flips to above both SMA13 
 | Signal | Daily SMA 8/13/21 on adjusted closes, **state flip** (see §3). |
 | Timing | End of day only. No intraday checks. |
 | Holidays | No holiday logic. No bhavcopy for a date = no trading day. |
-| Splits/bonuses | Past prices adjusted so corporate actions don't create fake crosses (see §4). |
+| Splits/bonuses/demergers | Past prices adjusted so corporate actions don't create fake crosses (see §4). Rights issues not adjusted in v1. |
 | Dedupe | One event per (stock, date, direction); one delivery per (event, user). Reruns are safe. |
 | No-signal days | Nothing sent to users; run is logged. |
 | Failures | Bhavcopy retried until 22:00 IST, then admin is notified. |
@@ -27,6 +27,9 @@ Telegram alerts when a watched NSE stock's daily SMA8 flips to above both SMA13 
   - Columns used: `TradDt, TckrSymb, SctySrs, ISIN, OpnPric, HghPric, LwPric, ClsPric, PrvsClsgPric, TtlTradgVol`.
   - Keep rows where `SctySrs == "EQ"`.
   - NSE switched to this format in mid-2024; a 2-year backfill stays within it. (Older files use a different format; not supported in v1.)
+
+- **Corporate actions, daily file:** `https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR{DDMMYY}.zip`, member `bcDDMMYYYY.csv` (older: `BcDDMMYY.csv`).
+- **Corporate actions, API:** `https://www.nseindia.com/api/corporates-corporateActions?index=equities&from_date=DD-MM-YYYY&to_date=DD-MM-YYYY` (needs a `Referer` header; bot-protected host, so failures are tolerated and retried next run).
 
 All NSE access goes through a `MarketDataSource` interface so a broker API (e.g. Kite Connect) can replace it later.
 
@@ -48,28 +51,50 @@ event on t  if state(t) in {ABOVE, BELOW} and state(t) != state(t-1)
 - Fires whether SMA8 crossed both on the same day or one at a time across several days.
 - A direct ABOVE → BELOW flip (gap move) also fires.
 - Needs ≥ 22 closes (21 for SMA21 + 1 previous day). Guaranteed by the backfill.
+- **Data gaps restart history:** if a stock is missing for more than 5 market trading days (suspension, moved to the BE series, a demerger's trade-for-trade period), its history restarts and it needs 21 continuous closes again before alerts resume. Averaging across the hole would mix prices from before and after an unknown change.
 - Pure function: `compute_events(closes: Series) -> list[Event]`. No I/O, fully unit-tested.
 
-## 4. Split / bonus adjustment
+## 4. Split / bonus / demerger adjustment
 
-Raw prices are stored unchanged. Adjustments are stored separately and applied on read.
-
-Detection, from bhavcopy itself: on an ex-date NSE reports `PrvsClsgPric` already adjusted for the split/bonus. So for each stock on day `t`:
+Raw prices are stored unchanged. Adjustments are stored separately and applied on read:
 
 ```
-factor = PrvsClsgPric(t) / ClsPric(t-1)
-if |factor - 1| > 1%:  record adjustment(symbol, ex_date=t, factor)
-adjusted_close(d) = close(d) * product(factor for ex_dates > d)
+adjusted_close(d) = close(d) * product(factor for actions with ex_date > d)
 ```
 
-**To verify during implementation:** confirm against a known recent split/bonus in a Nifty 50 stock. Fallback if it's unreliable: NSE corporate-actions data.
+**Why not use the bhavcopy's previous close?** The original plan assumed NSE adjusts `PrvsClsgPric` on ex-dates. Checked against real data, it doesn't, so prices alone can't tell a split from a crash.
+
+**Sources.** Two NSE sources, each incomplete on its own (checked Oct 2024 to Oct 2026):
+
+| Source | Misses |
+|---|---|
+| Daily `bc` file in the PR zip (reliable archives host) | Some splits/bonuses (e.g. SHRIRAMFIN 10 Jan 2025) and some demergers |
+| Corporate actions API (bot-protected host) | ETFs |
+
+Both are used. Each action gets a normalised key, so one reported by both sources is stored once:
+
+| Purpose text (examples) | Key | Factor |
+|---|---|---|
+| `BONUS 4:1`, `Bonus 4:1` | `bonus 4:1` | held / (new + held) = 0.2 |
+| `FV SPLT FRM RS 2 TO RE 1`, `Face Value Split … From Rs 2/- … To Re 1/-` | `split 2>1` | to / from = 0.5 |
+| `Consolidation … From Re 1 … To Rs 10` | `consolidation 1>10` | 10 |
+| `DEMERGER` | `demerger` | open on ex-date / previous close (no ratio is published; NSE's special pre-open session sets the price) |
+
+Several actions on one ex-date multiply (Bajaj Finance, 16 Jun 2025: bonus 4:1 + split 2>1 = 0.1).
+
+- **Ignored:** dividends, rights issues (v1 limitation; mostly small caps), bonus preference shares/debentures.
+- **Only actions already ex are stored:** files and the API also list announced ones, which can still be rescheduled.
+- **Check:** `tradio check-adjustments` compares each split/bonus factor with the actual overnight gap. On the 2-year backfill, 175 of 179 matched within 10%, and the 4 exceptions were normal daily moves on top of the split.
+- **Demergers of smaller stocks:** the stock usually leaves the EQ series for ~2 weeks after the ex-date, so there's no ex-date price to derive a factor from. The data-gap rule (§3) covers these. Large stocks (ITC, HINDUNILVR, Tata Motors, Siemens, Vedanta) trade through and are adjusted.
+- **Known gap: symbol renames** (e.g. TATAMOTORS → TMPV) start a new price history under the new symbol.
 
 ## 5. Data model (Postgres)
 
 ```
 instruments      symbol PK, isin, name, series, last_seen_date
 daily_prices     (symbol, trade_date) PK, open, high, low, close, prev_close, volume     -- raw, all EQ rows
-price_adjustments (symbol, ex_date) PK, factor, detected_at
+trading_days     trade_date PK, actions_loaded bool
+price_adjustments (symbol, ex_date, action) PK, factor, purpose, source, detected_at
 users            telegram_user_id PK, chat_id, username, is_admin, is_allowed, created_at
 watchlist        (user_id, symbol) PK, added_at
 signal_states    (symbol, trade_date) PK, sma8, sma13, sma21, state
@@ -85,9 +110,9 @@ Every EQ row is stored (~2,700/day, ~1.3M rows for 2 years), which is cheap and 
 
 Scheduled every 15 min from 18:00 to 22:00 IST, every day. Each tick is idempotent:
 
-1. Find dates after the last ingested date up to today. Fetch each bhavcopy. 404 → skip (non-trading day or not yet published).
+1. Find dates after the last ingested date up to today. Fetch each bhavcopy and its `bc` file. 404 → skip (non-trading day or not yet published). Then query the actions API for the last 14 days.
    This also catches up automatically if the laptop was off for some days.
-2. Upsert prices → detect adjustments → compute states for watched stocks → insert events (`ON CONFLICT DO NOTHING`).
+2. Upsert prices and actions → compute states for watched stocks → insert events (`ON CONFLICT DO NOTHING`).
 3. Create a `deliveries` row for each (event, user watching that stock).
 4. Send pending deliveries: **one digest message per user** with all their events. Mark sent/failed; failed ones retry on the next tick.
 5. Catch-up events older than 5 trading days are marked skipped, not sent.
@@ -145,7 +170,7 @@ Intraday checks · indicators other than SMA 8/13/21 · non-EQ series (BE, SM, e
 
 1. Skeleton: project layout, Postgres compose, migrations, config.
 2. Data: bhavcopy client, 2-year backfill.
-3. Adjustments: detection + verification against a known split/bonus.
+3. Adjustments: NSE corporate actions (bc file + API), verified against overnight gaps.
 4. Signal engine: pure function, unit tests, backtest report. **Checkpoint: eyeball a few events on charts.**
 5. Bot: allowlist, `/start /add /remove /list`, admin commands.
 6. Daily run: scheduler, events → deliveries → digest, retries, admin failure alert.

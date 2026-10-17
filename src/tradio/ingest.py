@@ -6,12 +6,13 @@ from collections.abc import Iterator
 from dataclasses import asdict
 from datetime import date, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from tradio.adjustments import store_actions
 from tradio.data.base import Bar, MarketDataSource
-from tradio.models import DailyPrice, Instrument
+from tradio.models import DailyPrice, Instrument, TradingDay
 
 log = logging.getLogger(__name__)
 
@@ -54,14 +55,6 @@ def store_day(session: Session, bars: list[Bar]) -> None:
     )
 
 
-def stored_dates(session: Session, start: date, end: date) -> set[date]:
-    return set(
-        session.scalars(
-            select(DailyPrice.trade_date).where(DailyPrice.trade_date.between(start, end)).distinct()
-        )
-    )
-
-
 def _days(start: date, end: date) -> Iterator[date]:
     day = start
     while day <= end:
@@ -69,26 +62,67 @@ def _days(start: date, end: date) -> Iterator[date]:
         day += timedelta(days=1)
 
 
-def backfill(session: Session, source: MarketDataSource, start: date, end: date, delay: float = 1.0) -> int:
-    """Fetch and store every trading day in [start, end] not already stored.
-
-    Every calendar day is tried: a missing file means no trading, and weekend
-    special sessions (Muhurat, budget day) are picked up without a holiday calendar.
-    Returns the number of trading days stored.
-    """
-    have = stored_dates(session, start, end)
-    stored = 0
-    for day in _days(start, end):
-        if day in have:
-            continue
+def ingest_day(session: Session, source: MarketDataSource, day: date) -> bool:
+    """Load prices and corporate actions for `day` if not loaded yet. Returns False if no trading."""
+    trading_day = session.get(TradingDay, day)
+    if trading_day is None:
         bars = source.fetch_day(day)
         if bars is None:
-            log.info("%s: no bhavcopy", day)
+            return False
+        store_day(session, bars)
+        trading_day = TradingDay(trade_date=day)
+        session.add(trading_day)
+        session.flush()
+        log.info("%s: stored %d bars", day, len(bars))
+
+    if not trading_day.actions_loaded:
+        actions = source.fetch_actions(day)
+        if actions is not None:
+            store_actions(session, actions)
+            trading_day.actions_loaded = True
+    session.commit()
+    return True
+
+
+def backfill(session: Session, source: MarketDataSource, start: date, end: date, delay: float = 1.0) -> int:
+    """Load every trading day in [start, end] that isn't fully loaded yet, then
+    cross-fill corporate actions for the whole range from NSE's actions API.
+
+    Every calendar day is tried: a missing bhavcopy means no trading, and weekend
+    special sessions (Muhurat, budget day) are picked up without a holiday calendar.
+    Returns the number of trading days seen.
+    """
+    done = set(
+        session.scalars(
+            select(TradingDay.trade_date).where(
+                TradingDay.trade_date.between(start, end), TradingDay.actions_loaded
+            )
+        )
+    )
+    seen = len(done)
+    for day in _days(start, end):
+        if day in done:
+            continue
+        if ingest_day(session, source, day):
+            seen += 1
         else:
-            store_day(session, bars)
-            session.commit()
-            stored += 1
-            log.info("%s: stored %d bars", day, len(bars))
+            log.info("%s: no bhavcopy", day)
         if delay:
             time.sleep(delay)
-    return stored
+
+    sync_actions_api(session, source, start, end)
+    return seen
+
+
+def sync_actions_api(session: Session, source: MarketDataSource, start: date, end: date) -> None:
+    """Add actions the daily bc files miss. Idempotent, so overlapping ranges are fine."""
+    latest = session.scalar(select(func.max(TradingDay.trade_date)).where(TradingDay.trade_date <= end))
+    if latest is None:
+        return
+    actions = source.fetch_actions_between(start, latest)
+    if actions is None:
+        return  # logged by the source; the next run's range covers it again
+    # Only actions already ex: an announced one may still be rescheduled.
+    added = store_actions(session, [a for a in actions if a.ex_date <= latest])
+    session.commit()
+    log.info("actions API %s..%s: %d share-change actions", start, latest, added)

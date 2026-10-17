@@ -1,51 +1,104 @@
-"""Split/bonus adjustment. See docs/v1-spec.md §4.
+"""Split/bonus/demerger adjustment. See docs/v1-spec.md §4.
 
-On an ex-date NSE reports the previous close already adjusted for the corporate
-action, so prev_close(t) / close(t-1) is the adjustment factor. Raw prices stay
-untouched; factors are stored and applied on read.
+Factors come from NSE's corporate actions data. (The bhavcopy's previous close
+is NOT adjusted on ex-dates, so prices alone can't tell a split from a crash.)
+Raw prices stay untouched; factors are stored and applied on read.
 """
 
+import logging
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import select, text
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from tradio.data.base import CorporateAction
 from tradio.models import DailyPrice, PriceAdjustment
 
-# Ordinary days differ only by rounding, so anything beyond this is a corporate action.
-THRESHOLD = Decimal("0.01")
+log = logging.getLogger(__name__)
 
-_DETECT_SQL = text(
+_EX_DATE_GAP_SQL = text(
     """
-    WITH days AS (
-        SELECT trade_date, LAG(trade_date) OVER (ORDER BY trade_date) AS market_prev_day
-        FROM (SELECT DISTINCT trade_date FROM daily_prices) d
-    ),
-    p AS (
-        SELECT symbol, trade_date, prev_close,
-               LAG(close) OVER w AS last_close,
-               LAG(trade_date) OVER w AS last_day
-        FROM daily_prices
-        WINDOW w AS (PARTITION BY symbol ORDER BY trade_date)
-    )
-    INSERT INTO price_adjustments (symbol, ex_date, factor)
-    SELECT p.symbol, p.trade_date, p.prev_close / p.last_close
-    FROM p JOIN days USING (trade_date)
-    -- Only compare consecutive market days: after a gap (suspension, BE series)
-    -- the reported prev_close refers to a close we don't have.
-    WHERE p.last_day = days.market_prev_day
-      AND p.last_close > 0
-      AND abs(p.prev_close / p.last_close - 1) > :threshold
-    ON CONFLICT DO NOTHING
+    SELECT p.open / prev.close
+    FROM daily_prices p
+    JOIN LATERAL (
+        SELECT close FROM daily_prices
+        WHERE symbol = p.symbol AND trade_date < p.trade_date
+        ORDER BY trade_date DESC LIMIT 1
+    ) prev ON prev.close > 0
+    WHERE p.symbol = :symbol AND p.trade_date = :ex_date
     """
 )
 
 
-def detect_adjustments(session: Session) -> int:
-    """Record any new split/bonus factors. Returns how many were added."""
-    return session.execute(_DETECT_SQL, {"threshold": THRESHOLD}).rowcount
+def ex_date_gap(session: Session, symbol: str, ex_date: date) -> Decimal | None:
+    """Open on the ex-date over the previous close, or None if either price is missing."""
+    return session.scalar(_EX_DATE_GAP_SQL, {"symbol": symbol, "ex_date": ex_date})
+
+
+def store_actions(session: Session, actions: list[CorporateAction]) -> int:
+    """Upsert actions. Same (symbol, ex_date, action) from another source is stored once.
+
+    Demergers carry no ratio, so their factor is the ex-date price gap; they're
+    skipped (and picked up on a later run) until those prices are stored.
+    Returns how many were stored.
+    """
+    rows = {}
+    for a in actions:
+        factor = a.factor if a.factor is not None else ex_date_gap(session, a.symbol, a.ex_date)
+        if factor is None:
+            log.info("%s %s %s: no prices around the ex-date yet, skipped", a.ex_date, a.symbol, a.action)
+            continue
+        rows[(a.symbol, a.ex_date, a.action)] = {
+            "symbol": a.symbol,
+            "ex_date": a.ex_date,
+            "action": a.action,
+            "factor": factor,
+            "purpose": a.purpose,
+            "source": a.source,
+        }
+    if not rows:
+        return 0
+    stmt = insert(PriceAdjustment).values(list(rows.values()))
+    # First source to report an action wins; the factor is the same either way.
+    session.execute(stmt.on_conflict_do_nothing())
+    return len(rows)
+
+
+@dataclass(frozen=True)
+class GapCheck:
+    symbol: str
+    ex_date: date
+    actions: str
+    factor: Decimal
+    gap: Decimal | None  # open on ex-date / previous close; None if no prices around the ex-date
+
+
+_GAP_SQL = text(
+    """
+    SELECT a.symbol, a.ex_date, string_agg(a.action, ' + ' ORDER BY a.action),
+           exp(sum(ln(a.factor))), p.open / prev.close
+    FROM price_adjustments a
+    LEFT JOIN daily_prices p ON p.symbol = a.symbol AND p.trade_date = a.ex_date
+    LEFT JOIN LATERAL (
+        SELECT close FROM daily_prices
+        WHERE symbol = a.symbol AND trade_date < a.ex_date
+        ORDER BY trade_date DESC LIMIT 1
+    ) prev ON true
+    -- Demerger factors are the gap by construction, so there's nothing to check.
+    WHERE a.action <> 'demerger'
+    GROUP BY a.symbol, a.ex_date, p.open, prev.close
+    ORDER BY a.ex_date
+    """
+)
+
+
+def gap_checks(session: Session) -> list[GapCheck]:
+    """Each split/bonus factor next to the actual overnight price gap, for sanity checking."""
+    return [GapCheck(*row) for row in session.execute(_GAP_SQL)]
 
 
 def adjusted_closes(session: Session, symbols: list[str], since: date | None = None) -> dict[str, list[tuple[date, Decimal]]]:

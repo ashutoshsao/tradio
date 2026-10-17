@@ -1,11 +1,18 @@
 """Compute and store SMA states and events for a set of stocks."""
 
+from datetime import date
+
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from tradio.adjustments import adjusted_closes
-from tradio.models import SignalEvent, SignalState
-from tradio.signals import compute_events, compute_states
+from tradio.models import SignalEvent, SignalState, TradingDay
+from tradio.signals import analyse
+
+
+def trading_calendar(session: Session) -> list[date]:
+    return list(session.scalars(select(TradingDay.trade_date).order_by(TradingDay.trade_date)))
 
 
 def evaluate(session: Session, symbols: list[str]) -> list[int]:
@@ -14,9 +21,10 @@ def evaluate(session: Session, symbols: list[str]) -> list[int]:
     States are rewritten every time because a newly detected split changes
     history. Events are only ever added. Returns ids of newly added events.
     """
+    calendar = trading_calendar(session)
     new_event_ids: list[int] = []
     for symbol, closes in adjusted_closes(session, symbols).items():
-        points = compute_states(closes)
+        points, events = analyse(closes, calendar)
         if not points:
             continue
 
@@ -33,7 +41,6 @@ def evaluate(session: Session, symbols: list[str]) -> list[int]:
             )
         )
 
-        events = compute_events(points)
         if events:
             stmt = (
                 insert(SignalEvent)

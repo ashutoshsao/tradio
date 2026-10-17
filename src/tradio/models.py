@@ -90,14 +90,32 @@ class DailyPrice(Base):
     volume: Mapped[int] = mapped_column(BigInteger)
 
 
+class TradingDay(Base):
+    """A day NSE published a bhavcopy, and whether its corporate actions are loaded."""
+
+    __tablename__ = "trading_days"
+
+    trade_date: Mapped[date] = mapped_column(primary_key=True)
+    actions_loaded: Mapped[bool] = mapped_column(default=False)
+
+
 class PriceAdjustment(Base):
-    """Split/bonus factor: prices before ex_date are multiplied by factor."""
+    """One corporate action: prices before ex_date are multiplied by factor.
+
+    `action` is a normalised key ("bonus 4:1", "split 2>1", "demerger") so the
+    same action reported by two NSE sources is stored once. Several actions on
+    one ex-date (e.g. bonus + split) multiply. No FK to instruments: NSE lists
+    actions for symbols we may not have seen yet.
+    """
 
     __tablename__ = "price_adjustments"
 
-    symbol: Mapped[str] = mapped_column(ForeignKey("instruments.symbol"), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
     ex_date: Mapped[date] = mapped_column(primary_key=True)
+    action: Mapped[str] = mapped_column(String(32), primary_key=True)
     factor: Mapped[Decimal] = mapped_column(Numeric(16, 10))
+    purpose: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(8))
     detected_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 

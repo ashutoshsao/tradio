@@ -6,18 +6,19 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from tradio.adjustments import adjusted_closes
+from tradio.engine import trading_calendar
 from tradio.models import DailyPrice
-from tradio.signals import compute_events, compute_states
+from tradio.signals import analyse
 
 FORWARD_DAYS = 10
 TRADING_DAYS_PER_YEAR = 248
 
 
 def detail(session: Session, symbols: list[str], last: int) -> str:
+    calendar = trading_calendar(session)
     lines = []
     for symbol, closes in sorted(adjusted_closes(session, symbols).items()):
-        points = compute_states(closes)
-        events = compute_events(points)
+        points, events = analyse(closes, calendar)
         index = {p.trade_date: i for i, p in enumerate(points)}
         lines.append(
             f"\n{symbol}: {len(events)} events over {len(points)} trading days "
@@ -45,10 +46,12 @@ def summary(session: Session, min_days: int = TRADING_DAYS_PER_YEAR) -> str:
             select(DailyPrice.symbol).group_by(DailyPrice.symbol).having(func.count() >= min_days)
         )
     )
+    calendar = trading_calendar(session)
     rates = {}
     for symbol, closes in adjusted_closes(session, symbols).items():
-        points = compute_states(closes)
-        rates[symbol] = len(compute_events(points)) / len(points) * TRADING_DAYS_PER_YEAR
+        points, events = analyse(closes, calendar)
+        if points:
+            rates[symbol] = len(events) / len(points) * TRADING_DAYS_PER_YEAR
 
     ordered = sorted(rates.values())
     pct = lambda q: ordered[int(q * (len(ordered) - 1))]  # noqa: E731

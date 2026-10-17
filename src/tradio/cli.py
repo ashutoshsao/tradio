@@ -24,28 +24,28 @@ def db_upgrade(_: argparse.Namespace) -> None:
 
 def backfill(args: argparse.Namespace) -> None:
     from tradio import ingest
-    from tradio.data.nse import NseBhavcopySource
+    from tradio.data.nse import NseArchiveSource
     from tradio.db import session
 
     end = args.end or date.today()
     start = args.start or end - timedelta(days=round(365.25 * args.years))
-    from tradio.adjustments import detect_adjustments
-
     with session() as s:
-        stored = ingest.backfill(s, NseBhavcopySource(), start, end, delay=args.delay)
-        found = detect_adjustments(s)
-        s.commit()
-    logging.info("backfill %s..%s done: %d new trading days, %d new split/bonus adjustments", start, end, stored, found)
+        days = ingest.backfill(s, NseArchiveSource(), start, end, delay=args.delay)
+    logging.info("backfill %s..%s done: %d trading days loaded", start, end, days)
 
 
-def detect(_: argparse.Namespace) -> None:
-    from tradio.adjustments import detect_adjustments
+def check_adjustments(args: argparse.Namespace) -> None:
+    from tradio.adjustments import gap_checks
     from tradio.db import session
 
     with session() as s:
-        found = detect_adjustments(s)
-        s.commit()
-    logging.info("%d new split/bonus adjustments", found)
+        checks = gap_checks(s)
+    with_gap = [c for c in checks if c.gap is not None]
+    off = [c for c in with_gap if abs(c.gap / c.factor - 1) > args.tolerance]
+    print(f"{len(checks)} adjustments, {len(with_gap)} with prices around the ex-date")
+    print(f"{len(with_gap) - len(off)} match the overnight gap within {args.tolerance:.0%}, {len(off)} don't:")
+    for c in off:
+        print(f"  {c.ex_date}  {c.symbol:<12} factor {c.factor:.4f}  gap {c.gap:.4f}  {c.actions}")
 
 
 def backtest(args: argparse.Namespace) -> None:
@@ -72,7 +72,9 @@ def main() -> None:
     bf.add_argument("--delay", type=float, default=1.0, help="seconds between requests (default 1)")
     bf.set_defaults(func=backfill)
 
-    sub.add_parser("detect-adjustments", help="find splits/bonuses in stored prices").set_defaults(func=detect)
+    ca = sub.add_parser("check-adjustments", help="compare split/bonus factors with actual price gaps")
+    ca.add_argument("--tolerance", type=float, default=0.1, help="allowed relative difference (default 0.1)")
+    ca.set_defaults(func=check_adjustments)
 
     bt = sub.add_parser("backtest", help="replay the signal over stored history (writes nothing)")
     bt.add_argument("symbols", nargs="*", help="stocks to detail; omit for a summary across all stocks")

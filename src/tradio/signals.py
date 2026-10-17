@@ -8,6 +8,10 @@ from decimal import Decimal
 from tradio.models import Direction, SmaState
 
 FAST, MID, SLOW = 8, 13, 21
+# A stock missing for longer than this (suspension, moved to the BE series, a
+# demerger's trade-for-trade period) restarts its history: averaging across the
+# hole would compare prices from before and after an unknown change.
+MAX_MISSING_DAYS = 5
 
 
 @dataclass(frozen=True)
@@ -56,3 +60,32 @@ def compute_events(points: Sequence[StatePoint]) -> list[Event]:
         if cur.state != prev.state and cur.state != SmaState.MIXED:
             events.append(Event(cur, Direction.BULLISH if cur.state == SmaState.ABOVE else Direction.BEARISH))
     return events
+
+
+def split_on_gaps(
+    closes: Sequence[tuple[date, Decimal]], calendar: Sequence[date], max_missing: int = MAX_MISSING_DAYS
+) -> list[list[tuple[date, Decimal]]]:
+    """Split a stock's closes into runs with no more than `max_missing` absent market days.
+
+    `calendar` is every market trading day, in order.
+    """
+    position = {d: i for i, d in enumerate(calendar)}
+    segments: list[list[tuple[date, Decimal]]] = []
+    prev = None
+    for day, close in closes:
+        i = position[day]
+        if prev is None or i - prev - 1 > max_missing:
+            segments.append([])
+        segments[-1].append((day, close))
+        prev = i
+    return segments
+
+
+def analyse(closes: Sequence[tuple[date, Decimal]], calendar: Sequence[date]) -> tuple[list[StatePoint], list[Event]]:
+    """States and events over a stock's whole history, restarting after each data gap."""
+    points, events = [], []
+    for segment in split_on_gaps(closes, calendar):
+        seg_points = compute_states(segment)
+        points.extend(seg_points)
+        events.extend(compute_events(seg_points))
+    return points, events

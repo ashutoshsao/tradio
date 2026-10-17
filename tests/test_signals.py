@@ -2,7 +2,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from tradio.models import Direction, SmaState
-from tradio.signals import classify, compute_events, compute_states
+from tradio.signals import analyse, classify, compute_events, compute_states, split_on_gaps
 
 START = date(2026, 1, 1)
 
@@ -70,3 +70,24 @@ def test_direct_flip_above_to_below_fires():
 
     events = compute_events([p(0, SmaState.ABOVE), p(1, SmaState.BELOW)])
     assert [e.direction for e in events] == [Direction.BEARISH]
+
+
+def test_split_on_gaps():
+    calendar = [START + timedelta(days=i) for i in range(20)]
+    closes = [(calendar[i], Decimal(1)) for i in (0, 1, 2, 8, 9, 16)]  # 5 missing, then 6 missing
+
+    segments = split_on_gaps(closes, calendar, max_missing=5)
+    assert [[calendar.index(d) for d, _ in seg] for seg in segments] == [[0, 1, 2, 8, 9], [16]]
+
+
+def test_gap_restarts_history_so_a_drop_across_it_does_not_fire():
+    # 30 days at 100, missing for 10 days (e.g. demerger trade-for-trade period), back at 60.
+    calendar = [START + timedelta(days=i) for i in range(70)]
+    closes = [(calendar[i], Decimal(100)) for i in range(30)] + [(calendar[i], Decimal(60)) for i in range(40, 70)]
+
+    points, events = analyse(closes, calendar)
+    assert events == []
+    assert len(points) == (30 - 20) + (30 - 20)  # each segment needs 21 closes before its first point
+
+    # Without the gap rule the same prices fire a false bearish alert.
+    assert [e.direction for e in compute_events(compute_states(closes))] == [Direction.BEARISH]
