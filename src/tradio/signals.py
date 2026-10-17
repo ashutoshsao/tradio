@@ -54,11 +54,18 @@ def compute_states(closes: Sequence[tuple[date, Decimal]]) -> list[StatePoint]:
 
 
 def compute_events(points: Sequence[StatePoint]) -> list[Event]:
-    """A flip into ABOVE or BELOW from any other state. The first point never fires (no prior state)."""
-    events = []
+    """A flip into ABOVE or BELOW from any other state, in the opposite direction to the last event.
+
+    BELOW -> MIXED -> BELOW is SMA8 bouncing off one average, not a new cross,
+    so it doesn't repeat the bearish alert. The first point never fires (no prior state).
+    """
+    events: list[Event] = []
     for prev, cur in zip(points, points[1:]):
-        if cur.state != prev.state and cur.state != SmaState.MIXED:
-            events.append(Event(cur, Direction.BULLISH if cur.state == SmaState.ABOVE else Direction.BEARISH))
+        if cur.state == prev.state or cur.state == SmaState.MIXED:
+            continue
+        direction = Direction.BULLISH if cur.state == SmaState.ABOVE else Direction.BEARISH
+        if not events or events[-1].direction != direction:
+            events.append(Event(cur, direction))
     return events
 
 

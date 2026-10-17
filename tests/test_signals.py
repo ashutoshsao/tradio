@@ -91,3 +91,14 @@ def test_gap_restarts_history_so_a_drop_across_it_does_not_fire():
 
     # Without the gap rule the same prices fire a false bearish alert.
     assert [e.direction for e in compute_events(compute_states(closes))] == [Direction.BEARISH]
+
+
+def test_same_direction_does_not_repeat_after_a_bounce():
+    from tradio.signals import StatePoint
+
+    def p(day, state):
+        return StatePoint(START + timedelta(days=day), Decimal(1), Decimal(1), Decimal(1), Decimal(1), state)
+
+    states = [SmaState.MIXED, SmaState.BELOW, SmaState.MIXED, SmaState.BELOW, SmaState.MIXED, SmaState.ABOVE]
+    events = compute_events([p(i, s) for i, s in enumerate(states)])
+    assert [(e.direction, e.point.trade_date.day) for e in events] == [(Direction.BEARISH, 2), (Direction.BULLISH, 6)]

@@ -45,14 +45,18 @@ state(t) = ABOVE  if sma8 > sma13 and sma8 > sma21
            MIXED  otherwise (incl. ties)
 
 event on t  if state(t) in {ABOVE, BELOW} and state(t) != state(t-1)
+            and its direction differs from the previous event's
             ABOVE → BULLISH, BELOW → BEARISH
 ```
+
+- Directions alternate: BELOW → MIXED → BELOW is SMA8 bouncing off one average, not a new cross, so it doesn't repeat the bearish alert. (Cuts the median from ~17 to ~13 alerts per stock per year.)
+- No minimum margin: any cross counts, so alerts line up with chart crossovers.
 
 - Fires whether SMA8 crossed both on the same day or one at a time across several days.
 - A direct ABOVE → BELOW flip (gap move) also fires.
 - Needs ≥ 22 closes (21 for SMA21 + 1 previous day). Guaranteed by the backfill.
 - **Data gaps restart history:** if a stock is missing for more than 5 market trading days (suspension, moved to the BE series, a demerger's trade-for-trade period), its history restarts and it needs 21 continuous closes again before alerts resume. Averaging across the hole would mix prices from before and after an unknown change.
-- Pure function: `compute_events(closes: Series) -> list[Event]`. No I/O, fully unit-tested.
+- Pure functions, no I/O, fully unit-tested. Verified against an independent source: SMA states recomputed from Yahoo Finance closes for 12 Nifty 50 stocks gave identical events, except where Yahoo has a phantom 15 Jan 2026 holiday bar, lacks the 1 Feb 2026 Budget-day session, or doesn't adjust for demergers.
 
 ## 4. Split / bonus / demerger adjustment
 
