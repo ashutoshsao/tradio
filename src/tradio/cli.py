@@ -56,6 +56,12 @@ def backtest(args: argparse.Namespace) -> None:
         print(bt.detail(s, [x.upper() for x in args.symbols], args.last) if args.symbols else bt.summary(s))
 
 
+def bot(_: argparse.Namespace) -> None:
+    from tradio.bot import run
+
+    run()
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -80,6 +86,8 @@ def main() -> None:
     bt.add_argument("symbols", nargs="*", help="stocks to detail; omit for a summary across all stocks")
     bt.add_argument("--last", type=int, default=10, help="events to show per stock (default 10)")
     bt.set_defaults(func=backtest)
+
+    sub.add_parser("bot", help="run the Telegram bot").set_defaults(func=bot)
 
     args = parser.parse_args()
     args.func(args)

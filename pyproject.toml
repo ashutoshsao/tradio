@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.28.1",
     "psycopg[binary]>=3.3.6",
     "pydantic-settings>=2.16.0",
+    "python-telegram-bot[job-queue]>=22.8",
     "sqlalchemy>=2",
 ]
 
