@@ -29,9 +29,31 @@ def backfill(args: argparse.Namespace) -> None:
 
     end = args.end or date.today()
     start = args.start or end - timedelta(days=round(365.25 * args.years))
+    from tradio.adjustments import detect_adjustments
+
     with session() as s:
         stored = ingest.backfill(s, NseBhavcopySource(), start, end, delay=args.delay)
-    logging.info("backfill %s..%s done: %d new trading days", start, end, stored)
+        found = detect_adjustments(s)
+        s.commit()
+    logging.info("backfill %s..%s done: %d new trading days, %d new split/bonus adjustments", start, end, stored, found)
+
+
+def detect(_: argparse.Namespace) -> None:
+    from tradio.adjustments import detect_adjustments
+    from tradio.db import session
+
+    with session() as s:
+        found = detect_adjustments(s)
+        s.commit()
+    logging.info("%d new split/bonus adjustments", found)
+
+
+def backtest(args: argparse.Namespace) -> None:
+    from tradio import backtest as bt
+    from tradio.db import session
+
+    with session() as s:
+        print(bt.detail(s, [x.upper() for x in args.symbols], args.last) if args.symbols else bt.summary(s))
 
 
 def main() -> None:
@@ -49,6 +71,13 @@ def main() -> None:
     bf.add_argument("--end", type=date.fromisoformat, help="last date, YYYY-MM-DD (default today)")
     bf.add_argument("--delay", type=float, default=1.0, help="seconds between requests (default 1)")
     bf.set_defaults(func=backfill)
+
+    sub.add_parser("detect-adjustments", help="find splits/bonuses in stored prices").set_defaults(func=detect)
+
+    bt = sub.add_parser("backtest", help="replay the signal over stored history (writes nothing)")
+    bt.add_argument("symbols", nargs="*", help="stocks to detail; omit for a summary across all stocks")
+    bt.add_argument("--last", type=int, default=10, help="events to show per stock (default 10)")
+    bt.set_defaults(func=backtest)
 
     args = parser.parse_args()
     args.func(args)
