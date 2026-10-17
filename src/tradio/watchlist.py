@@ -13,7 +13,17 @@ from sqlalchemy.orm import Session
 
 from tradio.adjustments import adjusted_closes
 from tradio.engine import evaluate, trading_calendar
-from tradio.models import Direction, Instrument, SignalEvent, SignalState, SmaState, TradingDay, User, WatchlistEntry
+from tradio.models import (
+    DailyPrice,
+    Direction,
+    Instrument,
+    SignalEvent,
+    SignalState,
+    SmaState,
+    TradingDay,
+    User,
+    WatchlistEntry,
+)
 from tradio.signals import SLOW, split_on_gaps
 
 MAX_WATCHLIST = 50
@@ -111,6 +121,35 @@ def stock_status(session: Session, symbol: str) -> StockStatus:
 
 
 @dataclass(frozen=True)
+class AlertItem:
+    symbol: str
+    name: str
+    trade_date: date
+    direction: Direction
+    close: Decimal
+    sma8: Decimal
+    sma13: Decimal
+    sma21: Decimal
+
+
+def latest_alerts(session: Session, symbols: list[str]) -> list[AlertItem]:
+    """Each symbol's most recent cross, in alert form (used for /testalert)."""
+    items = []
+    for symbol in symbols:
+        row = session.execute(
+            select(SignalEvent, Instrument.name)
+            .join(Instrument, Instrument.symbol == SignalEvent.symbol)
+            .where(SignalEvent.symbol == symbol)
+            .order_by(SignalEvent.trade_date.desc())
+            .limit(1)
+        ).first()
+        if row:
+            e, name = row
+            items.append(AlertItem(e.symbol, name, e.trade_date, e.direction, e.close, e.sma8, e.sma13, e.sma21))
+    return items
+
+
+@dataclass(frozen=True)
 class AddResult:
     added: list[StockStatus]
     already: list[str]
@@ -120,6 +159,62 @@ class AddResult:
 
 def normalise(symbol: str) -> str:
     return symbol.strip().upper().removesuffix(".NS")
+
+
+@dataclass(frozen=True)
+class Match:
+    symbol: str
+    name: str
+
+
+_NAME_NOISE = {"LTD", "LTD.", "LIMITED", "CO", "THE", "OF", "&", "AND", "INDIA", "CORP", "CORPORATION"}
+_search_cache: dict[date, list[tuple[str, str, Decimal]]] = {}
+
+
+def _tradeable(session: Session) -> list[tuple[str, str, Decimal]]:
+    """(symbol, name, traded value) for stocks on the latest trading day, cached per day."""
+    latest = latest_trading_day(session)
+    if latest not in _search_cache:
+        rows = session.execute(
+            select(Instrument.symbol, Instrument.name, DailyPrice.close * DailyPrice.volume)
+            .join(DailyPrice, (DailyPrice.symbol == Instrument.symbol) & (DailyPrice.trade_date == latest))
+            .where(Instrument.last_seen_date == latest)
+        )
+        _search_cache.clear()
+        _search_cache[latest] = [(sym, name, value) for sym, name, value in rows]
+    return _search_cache[latest]
+
+
+def _rank(query: str, symbol: str, name: str) -> int | None:
+    """Lower is better; None means no match."""
+    words = [w for w in name.upper().replace(".", " ").split() if w not in _NAME_NOISE]
+    terms = query.split()
+    if symbol == query:
+        return 0
+    if symbol.startswith(query.replace(" ", "")):
+        return 1
+    if all(any(w.startswith(t) for w in words) or symbol.startswith(t) for t in terms):
+        return 2 if words and words[0].startswith(terms[0]) else 3
+    if query.replace(" ", "") in symbol or query in name.upper():
+        return 4
+    return None
+
+
+def search(session: Session, query: str, limit: int = 8) -> list[Match]:
+    """Stocks matching a symbol or company name fragment, biggest companies first within each tier."""
+    q = " ".join(normalise(query).split())
+    if not q:
+        return []
+    ranked = []
+    for symbol, name, value in _tradeable(session):
+        if (tier := _rank(q, symbol, name)) is not None:
+            ranked.append((tier, -value, symbol, name))
+    if not ranked:  # typo: fall back to fuzzy symbol matching
+        symbols = {sym: (name, value) for sym, name, value in _tradeable(session)}
+        for sym in difflib.get_close_matches(q.replace(" ", ""), symbols, n=limit, cutoff=0.6):
+            ranked.append((5, -symbols[sym][1], sym, symbols[sym][0]))
+    ranked.sort()
+    return [Match(symbol, name) for _, _, symbol, name in ranked[:limit]]
 
 
 def add_symbols(session: Session, user_id: int, symbols: list[str]) -> AddResult:
@@ -133,7 +228,7 @@ def add_symbols(session: Session, user_id: int, symbols: list[str]) -> AddResult
         if symbol in watched:
             already.append(symbol)
         elif symbol not in tradeable:
-            unknown[symbol] = difflib.get_close_matches(symbol, tradeable, n=3, cutoff=0.6)
+            unknown[symbol] = [m.symbol for m in search(session, symbol, limit=3)]
         elif len(watched) >= MAX_WATCHLIST:
             full.append(symbol)
         else:

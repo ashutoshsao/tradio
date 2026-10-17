@@ -109,3 +109,43 @@ def test_messages_render(db):
     assert "Last cross: 🟢 bullish on 26 Jan 2026" in text
     assert "<b>NOPE</b> isn't an NSE stock" in text
     assert messages.watchlist([], None).startswith("You're not watching anything")
+
+
+def test_search_by_symbol_and_name_biggest_first(db):
+    day = START
+    rows = [
+        row(day, "HDFCBANK", "800").replace("HDFCBANK LTD", "HDFC BANK LTD"),
+        row(day, "HDFCLIFE", "600").replace("HDFCLIFE LTD", "HDFC LIFE INS CO LTD"),
+        row(day, "TMPV", "300").replace("TMPV LTD", "TATA MOTORS PASS VEH LTD"),
+        row(day, "SBIN", "700").replace("SBIN LTD", "STATE BANK OF INDIA"),
+    ]
+    store_day(db, parse_bhavcopy_csv(csv_text(*rows)))
+    db.add(TradingDay(trade_date=day, actions_loaded=True))
+    db.commit()
+    wl._search_cache.clear()
+
+    assert [m.symbol for m in wl.search(db, "hdfc")] == ["HDFCBANK", "HDFCLIFE"]  # same volume: higher price first
+    assert [m.symbol for m in wl.search(db, "tata motors")] == ["TMPV"]
+    assert [m.symbol for m in wl.search(db, "state bank")] == ["SBIN"]
+    assert [m.symbol for m in wl.search(db, "TMPV.NS")] == ["TMPV"]
+    assert [m.symbol for m in wl.search(db, "hdfcbnk")] == ["HDFCBANK"]  # typo
+    assert wl.search(db, "   ") == []
+
+
+def test_digest_format_and_split():
+    from decimal import Decimal
+
+    from tradio.models import Direction
+
+    def item(sym, d, direction=Direction.BULLISH):
+        return wl.AlertItem(sym, f"{sym} LTD", d, direction, Decimal("100"), Decimal("101"), Decimal("99"), Decimal("98"))
+
+    d1, d2 = date(2026, 10, 15), date(2026, 10, 16)
+    (text,) = messages.digest([item("TCS", d2, Direction.BEARISH), item("M&M", d2), item("INFY", d1)])
+    assert text.index("15 Oct 2026") < text.index("INFY") < text.index("16 Oct 2026") < text.index("M&amp;M") < text.index("TCS")
+    assert "🔴 <b>BEARISH · TCS</b>" in text
+    assert 'symbol=NSE%3AM_M"' in text
+    assert text.endswith(messages.DISCLAIMER)
+
+    chunks = messages.digest([item(f"S{i}", d2) for i in range(60)])
+    assert len(chunks) > 1 and all(len(c) <= messages.TELEGRAM_LIMIT for c in chunks)

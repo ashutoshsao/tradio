@@ -3,15 +3,20 @@
 from datetime import date
 from decimal import Decimal
 from html import escape
+from itertools import groupby
+from urllib.parse import quote
 
 from tradio.models import Direction, SmaState, User
-from tradio.watchlist import AddResult, StockStatus
+from tradio.watchlist import AddResult, AlertItem, StockStatus
 
 DISCLAIMER = "<i>Not investment advice.</i>"
 
 HELP = f"""<b>Tradio</b> alerts you when a stock's daily SMA8 crosses above both SMA13 and SMA21 (bullish) or below both (bearish). Checked once a day after NSE publishes closing prices (~6–7 PM IST).
 
-/add SYMBOL … – watch stocks, e.g. <code>/add RELIANCE TCS</code>
+Just type part of a company name (e.g. <code>hdfc</code> or <code>tata motors</code>) and tap a result to watch it.
+Or type <code>@TradioxBot hdf…</code> for live suggestions as you type.
+
+/add SYMBOL … – watch stocks by symbol, e.g. <code>/add RELIANCE TCS</code>
 /remove SYMBOL … – stop watching
 /list – your stocks and where each stands now
 /help – this message
@@ -23,7 +28,8 @@ ADMIN_HELP = """<b>Admin</b>
 /revoke ID – block access (keeps their watchlist; /allow restores it)
 /deleteuser ID – remove the user and their watchlist
 /users – everyone who has started the bot
-/status – last data loaded"""
+/status – last data loaded
+/testalert – preview an alert using your watchlist's latest crosses"""
 
 _STATE = {
     SmaState.ABOVE: "🟢 SMA8 above both",
@@ -54,6 +60,12 @@ def status_line(s: StockStatus, today: date | None = None) -> str:
     if s.last_event:
         line += f"\n    Last cross: {_DIRECTION[s.last_event[1]]} on {day(s.last_event[0])}"
     return line
+
+
+def search_results(query: str, matches) -> str:
+    if not matches:
+        return f"No NSE stock matches <b>{escape(query)}</b>. Try another part of the name or the symbol."
+    return f"🔍 <b>{escape(query)}</b> – tap to watch:"
 
 
 def welcome(user: User) -> str:
@@ -105,3 +117,48 @@ def users(rows: list[tuple[User, int]]) -> str:
         role = "admin" if user.is_admin else "allowed" if user.is_allowed else "waiting"
         lines.append(f"<code>{user.telegram_user_id}</code> {name} – {role}, {watching} stocks")
     return "<b>Users</b>\n" + "\n".join(lines) if lines else "No users yet."
+
+
+# --- Alerts -------------------------------------------------------------------
+
+TELEGRAM_LIMIT = 4096
+_HEADLINE = {
+    Direction.BULLISH: ("🟢", "BULLISH", "SMA8 crossed above SMA13 &amp; SMA21"),
+    Direction.BEARISH: ("🔴", "BEARISH", "SMA8 crossed below SMA13 &amp; SMA21"),
+}
+
+
+def chart_url(symbol: str) -> str:
+    # TradingView writes "&" and "-" in NSE symbols as "_" (M&M -> M_M, BAJAJ-AUTO -> BAJAJ_AUTO).
+    return "https://www.tradingview.com/chart/?symbol=" + quote(f"NSE:{symbol.replace('&', '_').replace('-', '_')}")
+
+
+def alert_block(a: AlertItem) -> str:
+    icon, label, what = _HEADLINE[a.direction]
+    return (
+        f"{icon} <b>{label} · {escape(a.symbol)}</b>\n"
+        f"{escape(a.name)}\n"
+        f"{what}\n"
+        f"Close ₹{price(a.close)} · SMA8 {price(a.sma8)} · SMA13 {price(a.sma13)} · SMA21 {price(a.sma21)}\n"
+        f'<a href="{chart_url(a.symbol)}">Open chart ↗</a>'
+    )
+
+
+def digest(alerts: list[AlertItem], test: bool = False) -> list[str]:
+    """One user's alerts as Telegram messages (split to fit the length limit), grouped by trading day."""
+    header = "🧪 <b>Test alert</b> – this is how alerts will look (using each stock's most recent cross)\n\n" if test else ""
+    blocks = []
+    ordered = sorted(alerts, key=lambda a: (a.trade_date, a.direction != Direction.BULLISH, a.symbol))
+    for trade_date, items in groupby(ordered, key=lambda a: a.trade_date):
+        blocks.append(f"📈 <b>Tradio · {day(trade_date)}</b>")
+        blocks.extend(alert_block(a) for a in items)
+    blocks.append(DISCLAIMER)
+
+    chunks, current = [], header
+    for block in blocks:
+        if current and len(current) + len(block) + 2 > TELEGRAM_LIMIT:
+            chunks.append(current.rstrip())
+            current = ""
+        current += block + "\n\n"
+    chunks.append(current.rstrip())
+    return chunks

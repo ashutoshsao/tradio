@@ -1,4 +1,7 @@
-"""Telegram bot: commands only. Logic lives in tradio.watchlist. See docs/v1-spec.md §7."""
+"""Telegram bot: commands, search buttons and inline autocomplete. Logic lives in tradio.watchlist.
+
+See docs/v1-spec.md §7.
+"""
 
 import asyncio
 import functools
@@ -6,14 +9,30 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from sqlalchemy import func, select
-from telegram import BotCommand, Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
+    Update,
+)
 from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    InlineQueryHandler,
+    MessageHandler,
+    filters,
+)
 
 from tradio import messages
 from tradio import watchlist as wl
 from tradio.config import get_settings
 from tradio.db import session
+from tradio.engine import evaluate
 from tradio.models import User, WatchlistEntry
 
 log = logging.getLogger(__name__)
@@ -31,8 +50,25 @@ async def db(fn, *args):
     return await asyncio.to_thread(call)
 
 
-async def reply(update: Update, text: str) -> None:
-    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+async def reply(update: Update, text: str, buttons: InlineKeyboardMarkup | None = None) -> None:
+    await update.effective_message.reply_text(
+        text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=buttons
+    )
+
+
+def _add_buttons(symbols_and_labels: list[tuple[str, str]]) -> InlineKeyboardMarkup | None:
+    if not symbols_and_labels:
+        return None
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(f"➕ {label}", callback_data=f"add:{symbol}")] for symbol, label in symbols_and_labels]
+    )
+
+
+def _remove_buttons(symbols: list[str]) -> InlineKeyboardMarkup | None:
+    if not symbols:
+        return None
+    rows = [symbols[i : i + 3] for i in range(0, len(symbols), 3)]
+    return InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {s}", callback_data=f"rm:{s}") for s in row] for row in rows])
 
 
 def _current_user(s, user_id: int) -> User | None:
@@ -44,7 +80,12 @@ def allowed(handler: Handler) -> Handler:
     @functools.wraps(handler)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await db(_current_user, update.effective_user.id) is None:
-            await reply(update, messages.not_allowed(update.effective_user.id))
+            if update.inline_query:
+                await update.inline_query.answer([], cache_time=10, is_personal=True)
+            elif update.callback_query:
+                await update.callback_query.answer("Not allowed")
+            else:
+                await reply(update, messages.not_allowed(update.effective_user.id))
             return
         await handler(update, context)
 
@@ -89,9 +130,66 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
         await reply(update, messages.add_result(wl.AddResult([], [], {}, []), None))
         return
-    result = await db(wl.add_symbols, update.effective_user.id, context.args)
+    await _add_and_reply(update, context.args)
+
+
+async def _add_and_reply(update: Update, symbols: list[str]) -> None:
+    result = await db(wl.add_symbols, update.effective_user.id, symbols)
     today = await db(wl.latest_trading_day)
-    await reply(update, messages.add_result(result, today))
+    suggestions = [(s, s) for options in result.unknown.values() for s in options]
+    await reply(update, messages.add_result(result, today), _add_buttons(suggestions))
+
+
+@allowed
+async def add_from_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A message sent by picking an inline-mode result: "/add SYMBOL"."""
+    await _add_and_reply(update, update.effective_message.text.split()[1:])
+
+
+@allowed
+async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.effective_message.text.strip()[:50]
+    matches = await db(wl.search, query)
+    await reply(update, messages.search_results(query, matches), _add_buttons([(m.symbol, f"{m.symbol} · {m.name}") for m in matches]))
+
+
+@allowed
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    action, _, symbol = query.data.partition(":")
+    if action == "add":
+        result = await db(wl.add_symbols, update.effective_user.id, [symbol])
+        await query.answer(f"Watching {symbol}" if result.added else f"Already watching {symbol}")
+        if result.added:
+            today = await db(wl.latest_trading_day)
+            await reply(update, messages.add_result(result, today))
+    elif action == "rm":
+        await db(wl.remove_symbols, update.effective_user.id, [symbol])
+        await query.answer(f"Removed {symbol}")
+        statuses = await db(wl.watchlist, update.effective_user.id)
+        today = await db(wl.latest_trading_day)
+        await query.edit_message_text(
+            messages.watchlist(statuses, today),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=_remove_buttons([st.symbol for st in statuses]),
+        )
+
+
+@allowed
+async def inline_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = update.inline_query.query.strip()
+    matches = await db(wl.search, text, 10) if text else []
+    results = [
+        InlineQueryResultArticle(
+            id=m.symbol,
+            title=m.symbol,
+            description=f"{m.name} · tap to watch",
+            input_message_content=InputTextMessageContent(f"/add {m.symbol}"),
+        )
+        for m in matches
+    ]
+    await update.inline_query.answer(results, cache_time=60, is_personal=True)
 
 
 @allowed
@@ -104,7 +202,7 @@ async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     statuses = await db(wl.watchlist, update.effective_user.id)
     today = await db(wl.latest_trading_day)
-    await reply(update, messages.watchlist(statuses, today))
+    await reply(update, messages.watchlist(statuses, today), _remove_buttons([s.symbol for s in statuses]))
 
 
 async def _set_access(update: Update, context: ContextTypes.DEFAULT_TYPE, allow: bool) -> None:
@@ -148,6 +246,19 @@ async def users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await reply(update, messages.users(await db(wl.list_users)))
 
 
+def _test_alerts(s, user_id: int) -> list[wl.AlertItem]:
+    symbols = [st.symbol for st in wl.watchlist(s, user_id)] or ["RELIANCE", "HDFCBANK"]
+    evaluate(s, symbols)  # make sure sample stocks have their history computed
+    s.commit()
+    return wl.latest_alerts(s, symbols)
+
+
+@admin_only
+async def test_alert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    for chunk in messages.digest(await db(_test_alerts, update.effective_user.id), test=True):
+        await reply(update, chunk)
+
+
 def _status(s) -> str:
     latest = wl.latest_trading_day(s)
     watched = s.scalar(select(func.count(func.distinct(WatchlistEntry.symbol))))
@@ -176,6 +287,8 @@ def build_application() -> Application:
     if token is None:
         raise SystemExit("TELEGRAM_BOT_TOKEN is not set (see .env.example)")
     app = Application.builder().token(token.get_secret_value()).post_init(_post_init).build()
+    # Picking an inline result sends "/add SYMBOL" via the bot; catch it before the command handlers.
+    app.add_handler(MessageHandler(filters.VIA_BOT & filters.Regex(r"^/add\s"), add_from_inline))
     for name, handler in [
         ("start", start),
         ("help", help_command),
@@ -187,8 +300,12 @@ def build_application() -> Application:
         ("deleteuser", delete_user),
         ("users", users),
         ("status", status),
+        ("testalert", test_alert),
     ]:
         app.add_handler(CommandHandler(name, handler))
+    app.add_handler(CallbackQueryHandler(button, pattern=r"^(add|rm):"))
+    app.add_handler(InlineQueryHandler(inline_search))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.VIA_BOT, search))
     return app
 
 
