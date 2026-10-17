@@ -21,3 +21,15 @@ def migrated_db():
         conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
     command.upgrade(_alembic_config(), "head")
     return get_engine()
+
+
+@pytest.fixture
+def db(migrated_db):
+    """A session on a clean database; all tables are emptied after the test."""
+    from tradio.db import session
+    from tradio.models import Base
+
+    with session() as s:
+        yield s
+    with migrated_db.begin() as conn:
+        conn.execute(text(f"TRUNCATE {', '.join(Base.metadata.tables)} CASCADE"))
