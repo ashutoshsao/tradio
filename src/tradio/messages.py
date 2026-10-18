@@ -6,6 +6,7 @@ from html import escape
 from itertools import groupby
 from urllib.parse import quote
 
+from tradio.config import IST
 from tradio.models import AlertKind, Direction, SmaState, User
 from tradio.signals import MAX_CROSSES, classify
 from tradio.watchlist import AddResult, AlertItem, StockStatus
@@ -164,6 +165,15 @@ def chart_url(symbol: str) -> str:
     return "https://www.tradingview.com/chart/?symbol=" + quote(f"NSE:{symbol.replace('&', '_').replace('-', '_')}")
 
 
+def clock(dt: datetime) -> str:
+    """A time each reader's Telegram shows in their own time zone and 12/24-hour setting.
+
+    Apps without date-time entities show the fallback text, in IST. Kept outside <b> so
+    no entity nesting is needed.
+    """
+    return f'<tg-time unix="{int(dt.timestamp())}" format="t">{dt.astimezone(IST):%H:%M} IST</tg-time>'
+
+
 def _smas(a: AlertItem) -> str:
     return f"SMA 8/13/21: {price(a.sma8)} · {price(a.sma13)} · {price(a.sma21)}"
 
@@ -179,14 +189,14 @@ def alert_block(a: AlertItem) -> str:
         lines = [
             f"{_ICON[a.direction]} <b>{symbol} · {cross}</b>",
             escape(a.name),
-            f"₹{price(a.price)} at {a.at:%H:%M} · {_chart(a)}",
+            f"₹{price(a.price)} at {clock(a.at)} · {_chart(a)}",
             _smas(a),
         ]
         if a.seq >= MAX_CROSSES:
             lines.append(f"<i>Cross #{a.seq} today: no more live alerts for {symbol} until the close.</i>")
     elif a.kind == AlertKind.UNDONE:
         lines = [
-            f"↩️ <b>{symbol} · cross undone at {a.at:%H:%M}</b>",
+            f"↩️ <b>{symbol} · cross undone</b> at {clock(a.at)}",
             f"₹{price(a.price)} · {_BACK_TO[classify(a.sma8, a.sma13, a.sma21)]}",
         ]
     elif a.kind == AlertKind.NOT_CONFIRMED:
@@ -209,12 +219,11 @@ _LIVE = (AlertKind.CROSS, AlertKind.UNDONE)
 
 def _day_header(trade_date: date, items: list[AlertItem]) -> str:
     live = [a for a in items if a.kind in _LIVE]
-    when = f"{trade_date.day} {trade_date:%b}"
+    header = f"📈 <b>Tradio · {trade_date.day} {trade_date:%b}</b>"
     if live and len(live) == len(items):
-        when += f", {max(a.at for a in live):%H:%M} · live"
+        header += f" · {clock(max(a.at for a in live))} · live"
     elif not live:
-        when += " · close"
-    header = f"📈 <b>Tradio · {when}</b>"
+        header += " · close"
     if live:
         header += "\n⏳ <i>Provisional: final verdict after the close</i>"
     return header

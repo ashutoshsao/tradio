@@ -142,10 +142,17 @@ def test_digest_format_and_split():
 
     d1, d2 = date(2026, 10, 15), date(2026, 10, 16)
     (text,) = messages.digest([item("TCS", d2, Direction.BEARISH), item("M&M", d2), item("INFY", d1)])
-    assert text.index("15 Oct · close") < text.index("INFY") < text.index("16 Oct · close") < text.index("M&amp;M") < text.index("TCS")
+    assert text.index("15 Oct</b> · close") < text.index("INFY") < text.index("16 Oct</b> · close") < text.index("M&amp;M") < text.index("TCS")
     assert "🔴 <b>TCS · bearish cross at the close</b>" in text
     assert 'symbol=NSE%3AM_M"' in text
     assert text.endswith(messages.DISCLAIMER)
 
     chunks = messages.digest([item(f"S{i}", d2) for i in range(60)])
     assert len(chunks) > 1 and all(len(c) <= messages.TELEGRAM_LIMIT for c in chunks)
+
+
+def test_clock_is_a_local_time_entity_with_an_ist_fallback():
+    from datetime import datetime, timezone
+
+    utc = datetime(2026, 10, 19, 5, 15, tzinfo=timezone.utc)  # 10:45 IST
+    assert messages.clock(utc) == '<tg-time unix="1792386900" format="t">10:45 IST</tg-time>'
