@@ -142,8 +142,8 @@ def test_digest_format_and_split():
 
     d1, d2 = date(2026, 10, 15), date(2026, 10, 16)
     (text,) = messages.digest([item("TCS", d2, Direction.BEARISH), item("M&M", d2), item("INFY", d1)])
-    assert text.index("15 Oct 2026") < text.index("INFY") < text.index("16 Oct 2026") < text.index("M&amp;M") < text.index("TCS")
-    assert "🔴 <b>BEARISH · TCS</b>" in text
+    assert text.index("15 Oct · close") < text.index("INFY") < text.index("16 Oct · close") < text.index("M&amp;M") < text.index("TCS")
+    assert "🔴 <b>TCS · bearish cross at the close</b>" in text
     assert 'symbol=NSE%3AM_M"' in text
     assert text.endswith(messages.DISCLAIMER)
 

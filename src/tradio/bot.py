@@ -306,9 +306,8 @@ async def test_alert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not samples:
         await reply(update, "No crosses in your stocks' history to build a sample from.")
         return
-    for title, alerts in zip(["During market hours (every 15 min):", "After the close (~6–7 PM):"], samples):
-        await reply(update, f"<b>{title}</b>")
-        for chunk in messages.digest(alerts, test=True):
+    for title, alerts in zip(["during market hours", "after the close"], samples):
+        for chunk in messages.digest(alerts, test_title=title):
             await reply(update, chunk)
 
 

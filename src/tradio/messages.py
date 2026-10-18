@@ -7,7 +7,7 @@ from itertools import groupby
 from urllib.parse import quote
 
 from tradio.models import AlertKind, Direction, SmaState, User
-from tradio.signals import MAX_CROSSES
+from tradio.signals import MAX_CROSSES, classify
 from tradio.watchlist import AddResult, AlertItem, StockStatus
 
 DISCLAIMER = "<i>Not investment advice.</i>"
@@ -151,9 +151,11 @@ def users(rows: list[tuple[User, int]]) -> str:
 # --- Alerts -------------------------------------------------------------------
 
 TELEGRAM_LIMIT = 4096
-_HEADLINE = {
-    Direction.BULLISH: ("🟢", "BULLISH", "SMA8 crossed above SMA13 &amp; SMA21"),
-    Direction.BEARISH: ("🔴", "BEARISH", "SMA8 crossed below SMA13 &amp; SMA21"),
+_ICON = {Direction.BULLISH: "🟢", Direction.BEARISH: "🔴"}
+_BACK_TO = {
+    SmaState.MIXED: "SMA8 back between 13 &amp; 21",
+    SmaState.ABOVE: "SMA8 back above 13 &amp; 21",
+    SmaState.BELOW: "SMA8 back below 13 &amp; 21",
 }
 
 
@@ -162,56 +164,70 @@ def chart_url(symbol: str) -> str:
     return "https://www.tradingview.com/chart/?symbol=" + quote(f"NSE:{symbol.replace('&', '_').replace('-', '_')}")
 
 
-def _numbers(a: AlertItem, label: str) -> str:
-    return f"{label} ₹{price(a.price)} · SMA8 {price(a.sma8)} · SMA13 {price(a.sma13)} · SMA21 {price(a.sma21)}"
+def _smas(a: AlertItem) -> str:
+    return f"SMA 8/13/21: {price(a.sma8)} · {price(a.sma13)} · {price(a.sma21)}"
+
+
+def _chart(a: AlertItem) -> str:
+    return f'<a href="{chart_url(a.symbol)}">Chart ↗</a>'
 
 
 def alert_block(a: AlertItem) -> str:
-    icon, label, what = _HEADLINE[a.direction]
-    symbol, chart = escape(a.symbol), f'<a href="{chart_url(a.symbol)}">Open chart ↗</a>'
+    """One stock's alert: a headline that carries the meaning, then price, chart and the three SMAs."""
+    symbol, cross = escape(a.symbol), f"{a.direction.value} cross"
     if a.kind == AlertKind.CROSS:
         lines = [
-            f"{icon} <b>{label} · {symbol}</b> <i>(provisional)</i>",
+            f"{_ICON[a.direction]} <b>{symbol} · {cross}</b>",
             escape(a.name),
-            f"{what} at {a.at:%H:%M} on the live price",
-            _numbers(a, "Price"),
-            "Confirmed or cancelled after the close.",
+            f"₹{price(a.price)} at {a.at:%H:%M} · {_chart(a)}",
+            _smas(a),
         ]
         if a.seq >= MAX_CROSSES:
-            lines.append(f"Cross #{a.seq} today: no more intraday alerts for {symbol} until the close.")
-        lines.append(chart)
+            lines.append(f"<i>Cross #{a.seq} today: no more live alerts for {symbol} until the close.</i>")
     elif a.kind == AlertKind.UNDONE:
         lines = [
-            f"↩️ <b>UNDONE · {symbol}</b>",
-            f"The {label.lower()} cross no longer holds at {a.at:%H:%M}",
-            _numbers(a, "Price"),
+            f"↩️ <b>{symbol} · cross undone at {a.at:%H:%M}</b>",
+            f"₹{price(a.price)} · {_BACK_TO[classify(a.sma8, a.sma13, a.sma21)]}",
         ]
     elif a.kind == AlertKind.NOT_CONFIRMED:
-        lines = [
-            f"❌ <b>NOT CONFIRMED · {symbol}</b>",
-            f"Today's {label.lower()} cross didn't hold at the close",
-            _numbers(a, "Close"),
-        ]
+        lines = [f"❌ <b>{symbol} · {cross} not confirmed</b>", f"Close ₹{price(a.price)} · didn't hold", _smas(a)]
     elif a.after_intraday:
-        lines = [f"✅ <b>CONFIRMED · {label} · {symbol}</b>", f"{what}: held at the close", _numbers(a, "Close"), chart]
-    else:  # crossed only at the close: the v1-style alert
-        lines = [f"{icon} <b>{label} · {symbol}</b>", escape(a.name), f"{what} at the close", _numbers(a, "Close"), chart]
+        lines = [f"✅ <b>{symbol} · {cross} confirmed</b>", f"Close ₹{price(a.price)} · {_chart(a)}", _smas(a)]
+    else:  # crossed only at the close
+        lines = [
+            f"{_ICON[a.direction]} <b>{symbol} · {cross} at the close</b>",
+            escape(a.name),
+            f"Close ₹{price(a.price)} · {_chart(a)}",
+            _smas(a),
+        ]
     return "\n".join(lines)
 
 
 _KIND_ORDER = {AlertKind.CONFIRMED: 0, AlertKind.NOT_CONFIRMED: 1, AlertKind.CROSS: 2, AlertKind.UNDONE: 3}
+_LIVE = (AlertKind.CROSS, AlertKind.UNDONE)
 
 
-def digest(alerts: list[AlertItem], test: bool = False) -> list[str]:
+def _day_header(trade_date: date, items: list[AlertItem]) -> str:
+    live = [a for a in items if a.kind in _LIVE]
+    when = f"{trade_date.day} {trade_date:%b}"
+    if live and len(live) == len(items):
+        when += f", {max(a.at for a in live):%H:%M} · live"
+    elif not live:
+        when += " · close"
+    header = f"📈 <b>Tradio · {when}</b>"
+    if live:
+        header += "\n⏳ <i>Provisional: final verdict after the close</i>"
+    return header
+
+
+def digest(alerts: list[AlertItem], test_title: str | None = None) -> list[str]:
     """One user's alerts as Telegram messages (split to fit the length limit), grouped by trading day."""
-    header = "🧪 <b>Test alert</b> – this is how alerts will look (sample prices from your stocks)\n\n" if test else ""
+    header = f"🧪 <b>Test · {test_title}</b>\n" if test_title else ""
     blocks = []
     ordered = sorted(alerts, key=lambda a: (a.trade_date, _KIND_ORDER[a.kind], a.direction != Direction.BULLISH, a.symbol))
     for trade_date, group in groupby(ordered, key=lambda a: a.trade_date):
         items = list(group)
-        live = [a.at for a in items if a.kind in (AlertKind.CROSS, AlertKind.UNDONE) and a.at]
-        when = f", {max(live):%H:%M} (live)" if live and len(live) == len(items) else ""
-        blocks.append(f"📈 <b>Tradio · {day(trade_date)}{when}</b>")
+        blocks.append(_day_header(trade_date, items))
         blocks.extend(alert_block(a) for a in items)
     blocks.append(DISCLAIMER)
 

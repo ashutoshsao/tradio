@@ -74,7 +74,7 @@ def test_new_cross_is_sent_once_to_each_watcher(db):
     result = asyncio.run(daily.tick(bot, source, at(today), ADMIN))
     assert result.new_days == [today]
     assert sorted(chat for chat, _ in bot.sent) == [ADMIN, FRIEND]
-    assert all("BULLISH · TCS" in text and "INFY" not in text for _, text in bot.sent)
+    assert all("TCS · bullish cross at the close" in text and "INFY" not in text for _, text in bot.sent)
     assert db.get(Run, today).status == RunStatus.DONE
 
     bot.sent.clear()

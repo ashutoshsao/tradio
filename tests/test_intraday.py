@@ -53,7 +53,8 @@ def test_live_cross_is_alerted_once_as_provisional(db):
     run(bot, FakeLive({"TCS": "120", "INFY": "100"}), at(today, 10, 0))
     assert sorted(chat for chat, _ in bot.sent) == [ADMIN, FRIEND]
     text = bot.sent[0][1]
-    assert "BULLISH · TCS</b> <i>(provisional)</i>" in text and "at 10:00 on the live price" in text
+    assert "🟢 <b>TCS · bullish cross</b>" in text and "₹120.00 at 10:00" in text
+    assert "Provisional: final verdict after the close" in text
     assert "INFY" not in text
     assert db.get(IntradaySignal, ("TCS", today)).active
 
@@ -85,7 +86,9 @@ def test_flip_flopping_is_capped_at_three_cross_alerts(db):
     assert kinds(db) == [("TCS", C, 1), ("TCS", U, 1), ("TCS", C, 2), ("TCS", U, 2), ("TCS", C, 3)]
     admin_texts = [text for chat, text in bot.sent if chat == ADMIN]
     assert len(admin_texts) == 5
-    assert "no more intraday alerts for TCS until the close" in admin_texts[-1]
+    assert "no more live alerts for TCS until the close" in admin_texts[-1]
+    assert "↩️ <b>TCS · cross undone at 10:15</b>" in admin_texts[1]
+    assert "SMA8 back between 13 &amp; 21" in admin_texts[1]
     row = db.get(IntradaySignal, ("TCS", today))
     assert (row.crosses, row.active) == (4, True)
 
@@ -99,7 +102,8 @@ def test_evening_confirms_a_cross_that_held(db):
 
     evening(bot, today, {"TCS": "119", "INFY": "100"})
     assert sorted(chat for chat, _ in bot.sent) == [ADMIN, FRIEND]
-    assert "✅ <b>CONFIRMED · BULLISH · TCS</b>" in bot.sent[0][1]
+    assert "✅ <b>TCS · bullish cross confirmed</b>" in bot.sent[0][1]
+    assert "· close</b>" in bot.sent[0][1]
 
 
 def test_evening_cancels_a_cross_that_was_live_at_the_end(db):
@@ -110,7 +114,7 @@ def test_evening_cancels_a_cross_that_was_live_at_the_end(db):
     bot.sent.clear()
 
     evening(bot, today, {"TCS": "100", "INFY": "100"})  # official close back to flat
-    assert "❌ <b>NOT CONFIRMED · TCS</b>" in bot.sent[0][1]
+    assert "❌ <b>TCS · bullish cross not confirmed</b>" in bot.sent[0][1]
     assert "Close ₹100.00" in bot.sent[0][1]
 
 
@@ -135,7 +139,7 @@ def test_cross_only_at_the_close_reads_like_a_normal_alert(db):
 
     evening(bot, today, {"TCS": "120", "INFY": "100"})
     text = bot.sent[0][1]
-    assert "🟢 <b>BULLISH · TCS</b>" in text and "at the close" in text and "CONFIRMED" not in text
+    assert "🟢 <b>TCS · bullish cross at the close</b>" in text and "confirmed" not in text
 
 
 def test_split_today_scales_history_instead_of_firing(db):
@@ -159,7 +163,7 @@ def test_missed_evening_run_is_caught_up_first(db):
     nse = FakeSource({yesterday: {"TCS": "100", "INFY": "100"}})
 
     run(bot, FakeLive({"TCS": "120", "INFY": "100"}), at(today, 10, 0), nse)
-    assert "BULLISH · TCS</b> <i>(provisional)</i>" in bot.sent[0][1]
+    assert "<b>TCS · bullish cross</b>" in bot.sent[0][1]
     assert db.get(IntradaySignal, ("TCS", today)) is not None
 
 
