@@ -120,6 +120,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             settings.admin_telegram_id,
             messages.access_request(tg.id, tg.username, tg.full_name),
             parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Allow", callback_data=f"allow:{tg.id}")]]),
         )
 
 
@@ -209,18 +210,44 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await reply(update, messages.watchlist(statuses, today), _remove_buttons([s.symbol for s in statuses]))
 
 
+def _grant(s, user_id: int, allow: bool) -> tuple[User | None, bool]:
+    """(user, changed). None if there's no such user or it's the admin."""
+    user = s.get(User, user_id)
+    was = user.is_allowed if user else None
+    user = wl.set_allowed(s, user_id, allow)
+    return user, user is not None and was != allow
+
+
+async def _welcome(context: ContextTypes.DEFAULT_TYPE, user: User) -> None:
+    await context.bot.send_message(user.chat_id, "You're in! " + messages.HELP, parse_mode=ParseMode.HTML)
+
+
 async def _set_access(update: Update, context: ContextTypes.DEFAULT_TYPE, allow: bool) -> None:
     if not context.args or not context.args[0].isdigit():
         await reply(update, f"Usage: /{'allow' if allow else 'revoke'} TELEGRAM_ID")
         return
     user_id = int(context.args[0])
-    user = await db(wl.set_allowed, user_id, allow)
+    user, changed = await db(_grant, user_id, allow)
     if user is None:
         await reply(update, "No such user (they need to send /start first), or it's the admin.")
         return
     await reply(update, f"{'Allowed' if allow else 'Revoked'} <code>{user_id}</code>.")
-    if allow:
-        await context.bot.send_message(user.chat_id, "You're in! " + messages.HELP, parse_mode=ParseMode.HTML)
+    if allow and changed:
+        await _welcome(context, user)
+
+
+@admin_only
+async def allow_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The ✅ Allow button on an access request."""
+    query = update.callback_query
+    user, changed = await db(_grant, int(query.data.partition(":")[2]), True)
+    if user is None:
+        await query.answer("No such user any more")
+        return
+    await query.answer("Allowed" if changed else "Already allowed")
+    await query.edit_message_text(query.message.text_html + "\n\n✅ Allowed", parse_mode=ParseMode.HTML)
+    if changed:
+        await _welcome(context, user)
 
 
 @admin_only
@@ -365,6 +392,7 @@ def build_application() -> Application:
     ]:
         app.add_handler(CommandHandler(name, handler))
     app.add_handler(CallbackQueryHandler(button, pattern=r"^(add|rm):"))
+    app.add_handler(CallbackQueryHandler(allow_button, pattern=r"^allow:\d+$"))
     app.add_handler(InlineQueryHandler(inline_search))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.VIA_BOT, search))
     return app

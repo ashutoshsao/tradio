@@ -107,7 +107,7 @@ def not_allowed(user_id: int) -> str:
 
 def access_request(user_id: int, username: str | None, name: str) -> str:
     who = f"@{escape(username)}" if username else escape(name)
-    return f"Access request from {who} (ID <code>{user_id}</code>).\nApprove with /allow {user_id}"
+    return f"Access request from {who} (ID <code>{user_id}</code>).\nTap Allow, or send /allow {user_id}"
 
 
 def add_result(r: AddResult, today: date | None) -> str:
