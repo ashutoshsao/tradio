@@ -1,0 +1,11 @@
+# Sections for GitHub's "Generate release notes": merged PRs grouped by label.
+changelog:
+  categories:
+    - title: Breaking changes
+      labels: [breaking]
+    - title: Features
+      labels: [feature]
+    - title: Fixes
+      labels: [fix]
+    - title: Other changes
+      labels: ["*"]
