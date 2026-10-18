@@ -77,6 +77,53 @@ def run_daily(_: argparse.Namespace) -> None:
     asyncio.run(go())
 
 
+def run_intraday(args: argparse.Namespace) -> None:
+    import asyncio
+    from datetime import datetime
+
+    from telegram import Bot
+
+    from tradio import intraday
+    from tradio.config import IST, get_settings
+    from tradio.data.nse import NseArchiveSource
+    from tradio.data.upstox import UpstoxSource
+    from tradio.db import session
+    from tradio.watchlist import latest_trading_day
+
+    settings = get_settings()
+    if settings.upstox_analytics_token is None:
+        raise SystemExit("UPSTOX_ANALYTICS_TOKEN is not set (see .env.example)")
+    live = UpstoxSource(settings.upstox_analytics_token.get_secret_value())
+    now = datetime.now(IST)
+
+    if args.dry_run:
+        if live.market_hours(now.date()) is None:
+            raise SystemExit("NSE is closed today: live prices are the last session's, so there's nothing to check.")
+        with session() as s:
+            if not intraday.history_is_current(live, latest_trading_day(s), now.date()):
+                raise SystemExit("Price history is behind (missed evening run); run `tradio run-daily` first.")
+            results = intraday.evaluate_live(s, live, now.date())
+        print(f"Live provisional state at {now:%Y-%m-%d %H:%M} (nothing stored or sent):")
+        for p in results:
+            cross = f"  CROSS {p.direction.upper()}" if p.direction else ""
+            action = f"  (history x{p.factor:.4f}: corporate action today)" if p.factor != 1 else ""
+            print(
+                f"  {p.symbol:<12} {p.point.close:>10,.2f}  SMA8 {p.point.sma8:,.2f}  SMA13 {p.point.sma13:,.2f}"
+                f"  SMA21 {p.point.sma21:,.2f}  {p.point.state}{cross}{action}"
+            )
+        return
+
+    if settings.telegram_bot_token is None:
+        raise SystemExit("TELEGRAM_BOT_TOKEN is not set (see .env.example)")
+
+    async def go():
+        async with Bot(settings.telegram_bot_token.get_secret_value()) as tg:
+            ids = await intraday.tick(tg, live, NseArchiveSource(), now, settings.admin_telegram_id)
+            print("market closed or not yet 15 min after the open: skipped" if ids is None else f"{len(ids)} new alerts")
+
+    asyncio.run(go())
+
+
 def bot(_: argparse.Namespace) -> None:
     from tradio.bot import run
 
@@ -108,8 +155,12 @@ def main() -> None:
     bt.add_argument("--last", type=int, default=10, help="events to show per stock (default 10)")
     bt.set_defaults(func=backtest)
 
-    sub.add_parser("bot", help="run the Telegram bot (includes the evening run)").set_defaults(func=bot)
+    sub.add_parser("bot", help="run the Telegram bot (includes the intraday and evening runs)").set_defaults(func=bot)
     sub.add_parser("run-daily", help="one evening-run tick: load data, find crosses, send alerts").set_defaults(func=run_daily)
+
+    it = sub.add_parser("intraday", help="one intraday tick now: live prices, provisional crosses, alerts")
+    it.add_argument("--dry-run", action="store_true", help="print each watched stock's live state; store and send nothing")
+    it.set_defaults(func=run_intraday)
 
     args = parser.parse_args()
     args.func(args)

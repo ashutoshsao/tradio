@@ -1,7 +1,10 @@
 from functools import lru_cache
+from zoneinfo import ZoneInfo
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 class Settings(BaseSettings):
@@ -13,6 +16,8 @@ class Settings(BaseSettings):
     # Optional until the bot milestone; data and signal commands don't need them.
     telegram_bot_token: SecretStr | None = None
     admin_telegram_id: int | None = None
+    # v2 intraday alerts; without it only the evening run works.
+    upstox_analytics_token: SecretStr | None = None
 
 
 @lru_cache

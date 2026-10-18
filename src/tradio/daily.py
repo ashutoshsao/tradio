@@ -1,37 +1,31 @@
-"""The evening run: load new NSE data, find crosses, send digests. See docs/v1-spec.md §6.
+"""The evening run: load NSE's official closes, confirm or cancel the day's crosses, send digests.
 
-Every tick is idempotent, so it can run every 15 minutes from the bot's job
-queue or as a Kubernetes CronJob.
+See docs/v1-spec.md §6 and docs/v2-spec.md §4. Every tick is idempotent, so it
+can run every 15 minutes from the bot's job queue or as a Kubernetes CronJob.
 """
 
-import asyncio
 import logging
-from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
-from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 from telegram import Bot
 from telegram.constants import ParseMode
-from telegram.error import Forbidden, TelegramError
 
 from tradio import messages
+from tradio.alerts import add_alert, queue_deliveries, send_pending, watched_symbols
+from tradio.config import IST
 from tradio.data.base import MarketDataSource
-from tradio.db import session as new_session
-from tradio.engine import evaluate, trading_calendar
+from tradio.db import in_session
+from tradio.engine import evaluate
 from tradio.ingest import ingest_day, sync_actions_api
-from tradio.models import Delivery, DeliveryStatus, Instrument, Run, RunStatus, SignalEvent, TradingDay, User, WatchlistEntry
-from tradio.watchlist import AlertItem
+from tradio.models import AlertKind, DailyPrice, IntradaySignal, Run, RunStatus, SignalEvent, SignalState, TradingDay
+from tradio.signals import MAX_CROSSES
 
 log = logging.getLogger(__name__)
 
-IST = ZoneInfo("Asia/Kolkata")
 WINDOW_START, WINDOW_END = time(18, 0), time(22, 0)
-MAX_ALERT_AGE = 5  # trading days; older crosses (e.g. after a long laptop sleep) aren't sent
-MAX_ATTEMPTS = 5
 ACTIONS_API_LOOKBACK = timedelta(days=14)
 BACKFILL_START_IF_EMPTY = timedelta(days=60)
 
@@ -57,72 +51,48 @@ def ingest_new_days(session: Session, source: MarketDataSource, today: date) -> 
     return new_days
 
 
-def watched_symbols(session: Session) -> list[str]:
-    return list(
-        session.scalars(
-            select(WatchlistEntry.symbol)
-            .join(User, User.telegram_user_id == WatchlistEntry.user_id)
-            .where(User.is_allowed)
-            .distinct()
+def close_alerts(session: Session, event_ids: list[int], days: list[date]) -> list[int]:
+    """Confirmed / not-confirmed alerts for newly loaded days. Returns new alert ids."""
+    events = session.scalars(select(SignalEvent).where(SignalEvent.id.in_(event_ids))).all()
+    intraday = {
+        (r.symbol, r.trade_date): r
+        for r in session.scalars(select(IntradaySignal).where(IntradaySignal.trade_date.in_(days)))
+    }
+    ids = []
+    for e in events:
+        row = intraday.pop((e.symbol, e.trade_date), None)
+        ids.append(
+            add_alert(
+                session, symbol=e.symbol, trade_date=e.trade_date, kind=AlertKind.CONFIRMED,
+                direction=e.direction, price=e.close, sma8=e.sma8, sma13=e.sma13, sma21=e.sma21,
+                after_intraday=row is not None and row.direction == e.direction,
+            )
         )
-    )
-
-
-def queue_deliveries(session: Session, event_ids: list[int]) -> int:
-    """One pending delivery per (new event, allowed user watching it), for recent events only."""
-    if not event_ids:
-        return 0
-    calendar = trading_calendar(session)
-    oldest = calendar[-MAX_ALERT_AGE] if len(calendar) >= MAX_ALERT_AGE else date.min
-    pairs = session.execute(
-        select(SignalEvent.id, WatchlistEntry.user_id)
-        .join(WatchlistEntry, WatchlistEntry.symbol == SignalEvent.symbol)
-        .join(User, User.telegram_user_id == WatchlistEntry.user_id)
-        .where(SignalEvent.id.in_(event_ids), SignalEvent.trade_date >= oldest, User.is_allowed)
-    ).all()
-    if pairs:
-        session.execute(
-            insert(Delivery).values([{"event_id": e, "user_id": u} for e, u in pairs]).on_conflict_do_nothing()
+    for (symbol, day), row in intraday.items():
+        # An undone cross was already reported; only a cross users last saw as live needs cancelling.
+        if not (row.active or row.crosses >= MAX_CROSSES):
+            continue
+        state = session.get(SignalState, (symbol, day))
+        close = session.get(DailyPrice, (symbol, day))
+        ids.append(
+            add_alert(
+                session, symbol=symbol, trade_date=day, kind=AlertKind.NOT_CONFIRMED, direction=row.direction,
+                price=close.close if close else row.price,
+                sma8=state.sma8 if state else row.sma8,
+                sma13=state.sma13 if state else row.sma13,
+                sma21=state.sma21 if state else row.sma21,
+            )
         )
-    return len(pairs)
+    return [i for i in ids if i is not None]
 
 
-@dataclass
-class Outbox:
-    chat_id: int
-    deliveries: list[tuple[int, int]] = field(default_factory=list)  # (event_id, user_id)
-    alerts: list[AlertItem] = field(default_factory=list)
-
-
-def pending_outboxes(session: Session) -> dict[int, Outbox]:
-    rows = session.execute(
-        select(Delivery, SignalEvent, Instrument.name, User.chat_id)
-        .join(SignalEvent, SignalEvent.id == Delivery.event_id)
-        .join(Instrument, Instrument.symbol == SignalEvent.symbol)
-        .join(User, User.telegram_user_id == Delivery.user_id)
-        .where(
-            Delivery.status.in_([DeliveryStatus.PENDING, DeliveryStatus.FAILED]),
-            Delivery.attempts < MAX_ATTEMPTS,
-            User.is_allowed,
-        )
-    )
-    boxes: dict[int, Outbox] = {}
-    for d, e, name, chat_id in rows:
-        box = boxes.setdefault(d.user_id, Outbox(chat_id))
-        box.deliveries.append((d.event_id, d.user_id))
-        box.alerts.append(AlertItem(e.symbol, name, e.trade_date, e.direction, e.close, e.sma8, e.sma13, e.sma21))
-    return boxes
-
-
-def mark(session: Session, keys: list[tuple[int, int]], status: DeliveryStatus, error: str | None = None) -> None:
-    for event_id, user_id in keys:
-        d = session.get(Delivery, (event_id, user_id))
-        d.status = status
-        d.attempts += 1
-        d.error = error
-        if status == DeliveryStatus.SENT:
-            d.sent_at = datetime.now(IST)
+def load_and_alert(session: Session, source: MarketDataSource, today: date) -> tuple[list[date], int, int]:
+    """Load any new trading days, evaluate watched stocks, queue alerts. Returns (new days, events, deliveries)."""
+    new_days = ingest_new_days(session, source, today)
+    event_ids = evaluate(session, watched_symbols(session)) if new_days else []
+    queued = queue_deliveries(session, close_alerts(session, event_ids, new_days)) if new_days else 0
     session.commit()
+    return new_days, len(event_ids), queued
 
 
 def start_run(session: Session, day: date) -> Run:
@@ -157,53 +127,21 @@ class TickResult:
     no_data_alert: bool = False
 
 
-async def _db(fn, *args):
-    def call():
-        with new_session() as s:
-            return fn(s, *args)
-
-    return await asyncio.to_thread(call)
-
-
-def _load_and_queue(session: Session, source: MarketDataSource, today: date) -> tuple[list[date], int, int]:
+def _run_and_alert(session: Session, source: MarketDataSource, today: date) -> tuple[list[date], int, int]:
     start_run(session, today)
-    new_days = ingest_new_days(session, source, today)
-    event_ids = evaluate(session, watched_symbols(session)) if new_days else []
-    queued = queue_deliveries(session, event_ids)
-    session.commit()
+    result = load_and_alert(session, source, today)
     if session.get(TradingDay, today) is not None:
         finish_run(session, today, RunStatus.DONE)
-    return new_days, len(event_ids), queued
-
-
-async def send_pending(bot: Bot) -> tuple[int, int]:
-    """Send every pending digest. Returns (users sent, users failed)."""
-    sent = failed = 0
-    for user_id, box in (await _db(pending_outboxes)).items():
-        try:
-            for chunk in messages.digest(box.alerts):
-                await bot.send_message(box.chat_id, chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        except Forbidden as exc:  # user blocked the bot or deleted their account
-            log.warning("user %s unreachable: %s", user_id, exc)
-            await _db(mark, box.deliveries, DeliveryStatus.SKIPPED, str(exc))
-            failed += 1
-        except TelegramError as exc:
-            log.warning("sending to user %s failed: %s", user_id, exc)
-            await _db(mark, box.deliveries, DeliveryStatus.FAILED, str(exc))
-            failed += 1
-        else:
-            await _db(mark, box.deliveries, DeliveryStatus.SENT)
-            sent += 1
-    return sent, failed
+    return result
 
 
 async def tick(bot: Bot, source: MarketDataSource, now: datetime, admin_id: int | None) -> TickResult:
     today = now.astimezone(IST).date()
     try:
-        new_days, events, queued = await _db(_load_and_queue, source, today)
+        new_days, events, queued = await in_session(_run_and_alert, source, today)
     except Exception as exc:
         log.exception("daily run failed")
-        if await _db(finish_run, today, RunStatus.FAILED, repr(exc)) and admin_id:
+        if await in_session(finish_run, today, RunStatus.FAILED, repr(exc)) and admin_id:
             await bot.send_message(admin_id, messages.run_failed(today, exc), parse_mode=ParseMode.HTML)
         raise
     sent, failed = await send_pending(bot)
@@ -211,8 +149,8 @@ async def tick(bot: Bot, source: MarketDataSource, now: datetime, admin_id: int 
 
     # Last tick of the evening on a weekday and still no file: tell the admin once.
     if now.astimezone(IST).time() >= WINDOW_END and today.weekday() < 5 and admin_id:
-        if await _db(_run_status, today) == RunStatus.RUNNING:
-            await _db(finish_run, today, RunStatus.NO_DATA)
+        if await in_session(_run_status, today) == RunStatus.RUNNING:
+            await in_session(finish_run, today, RunStatus.NO_DATA)
             await bot.send_message(admin_id, messages.no_data(today), parse_mode=ParseMode.HTML)
             result.no_data_alert = True
     log.info("tick %s: %s", now.astimezone(IST).strftime("%Y-%m-%d %H:%M"), result)

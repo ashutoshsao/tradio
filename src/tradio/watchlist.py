@@ -5,7 +5,7 @@ Plain functions over a Session so they can be tested without Telegram.
 
 import difflib
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import delete, func, select
@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from tradio.adjustments import adjusted_closes
 from tradio.engine import evaluate, trading_calendar
 from tradio.models import (
+    AlertKind,
     DailyPrice,
     Direction,
     Instrument,
@@ -126,14 +127,18 @@ class AlertItem:
     name: str
     trade_date: date
     direction: Direction
-    close: Decimal
+    price: Decimal  # live price for intraday alerts, official close otherwise
     sma8: Decimal
     sma13: Decimal
     sma21: Decimal
+    kind: AlertKind = AlertKind.CONFIRMED
+    seq: int = 0  # which intraday cross of the day
+    after_intraday: bool = False  # confirmed: users already had a provisional alert
+    at: datetime | None = None
 
 
 def latest_alerts(session: Session, symbols: list[str]) -> list[AlertItem]:
-    """Each symbol's most recent cross, in alert form (used for /testalert)."""
+    """Each symbol's most recent cross, as a confirmed-at-close alert (used for /testalert)."""
     items = []
     for symbol in symbols:
         row = session.execute(

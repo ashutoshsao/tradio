@@ -12,6 +12,8 @@ FAST, MID, SLOW = 8, 13, 21
 # demerger's trade-for-trade period) restarts its history: averaging across the
 # hole would compare prices from before and after an unknown change.
 MAX_MISSING_DAYS = 5
+# Intraday cross alerts per stock per day (docs/v2-spec.md §4).
+MAX_CROSSES = 3
 
 
 @dataclass(frozen=True)

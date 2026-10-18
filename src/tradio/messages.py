@@ -1,17 +1,20 @@
 """Telegram message text (HTML). Pure functions."""
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from html import escape
 from itertools import groupby
 from urllib.parse import quote
 
-from tradio.models import Direction, SmaState, User
+from tradio.models import AlertKind, Direction, SmaState, User
+from tradio.signals import MAX_CROSSES
 from tradio.watchlist import AddResult, AlertItem, StockStatus
 
 DISCLAIMER = "<i>Not investment advice.</i>"
 
-HELP = f"""<b>Tradio</b> alerts you when a stock's daily SMA8 crosses above both SMA13 and SMA21 (bullish) or below both (bearish). Checked once a day after NSE publishes closing prices (~6–7 PM IST).
+HELP = f"""<b>Tradio</b> alerts you when a stock's daily SMA8 crosses above both SMA13 and SMA21 (bullish) or below both (bearish).
+
+During market hours it checks every 15 minutes, using the live price as today's close, and alerts as soon as a cross appears (<i>provisional</i>; at most {MAX_CROSSES} per stock a day). After NSE publishes the official close (~6–7 PM IST) you get the verdict: ✅ confirmed or ❌ not confirmed.
 
 Just type part of a company name (e.g. <code>hdfc</code> or <code>tata motors</code>) and tap a result to watch it.
 Or type <code>@TradioxBot hdf…</code> for live suggestions as you type.
@@ -28,8 +31,8 @@ ADMIN_HELP = """<b>Admin</b>
 /revoke ID – block access (keeps their watchlist; /allow restores it)
 /deleteuser ID – remove the user and their watchlist
 /users – everyone who has started the bot
-/status – last data loaded
-/testalert – preview an alert using your watchlist's latest crosses"""
+/status – last data loaded, Upstox token expiry
+/testalert – preview intraday and evening alerts using your watchlist"""
 
 _STATE = {
     SmaState.ABOVE: "🟢 SMA8 above both",
@@ -71,6 +74,21 @@ def no_data(d: date) -> str:
 
 def run_failed(d: date, exc: Exception) -> str:
     return f"⚠️ Daily run for {day(d)} failed: <code>{escape(repr(exc))[:500]}</code>\nIt retries every 15 minutes until 10 PM."
+
+
+def intraday_failed(d: date, exc: Exception) -> str:
+    return (
+        f"⚠️ Intraday check on {day(d)} failed: <code>{escape(repr(exc))[:500]}</code>\n"
+        "It retries every 15 minutes; this message is sent once a day. The evening run still sends confirmed crosses."
+    )
+
+
+def token_expiring(expiry: datetime, days_left: int) -> str:
+    return (
+        f"⏳ The Upstox Analytics Token expires on {day(expiry.date())} ({max(days_left, 0)} days). "
+        "Generate a new one at account.upstox.com/developer/apps (Analytics tab) and put it in "
+        "<code>UPSTOX_ANALYTICS_TOKEN</code>, then restart the bot. Until then intraday alerts stop; evening alerts carry on."
+    )
 
 
 def search_results(query: str, matches) -> str:
@@ -144,24 +162,56 @@ def chart_url(symbol: str) -> str:
     return "https://www.tradingview.com/chart/?symbol=" + quote(f"NSE:{symbol.replace('&', '_').replace('-', '_')}")
 
 
+def _numbers(a: AlertItem, label: str) -> str:
+    return f"{label} ₹{price(a.price)} · SMA8 {price(a.sma8)} · SMA13 {price(a.sma13)} · SMA21 {price(a.sma21)}"
+
+
 def alert_block(a: AlertItem) -> str:
     icon, label, what = _HEADLINE[a.direction]
-    return (
-        f"{icon} <b>{label} · {escape(a.symbol)}</b>\n"
-        f"{escape(a.name)}\n"
-        f"{what}\n"
-        f"Close ₹{price(a.close)} · SMA8 {price(a.sma8)} · SMA13 {price(a.sma13)} · SMA21 {price(a.sma21)}\n"
-        f'<a href="{chart_url(a.symbol)}">Open chart ↗</a>'
-    )
+    symbol, chart = escape(a.symbol), f'<a href="{chart_url(a.symbol)}">Open chart ↗</a>'
+    if a.kind == AlertKind.CROSS:
+        lines = [
+            f"{icon} <b>{label} · {symbol}</b> <i>(provisional)</i>",
+            escape(a.name),
+            f"{what} at {a.at:%H:%M} on the live price",
+            _numbers(a, "Price"),
+            "Confirmed or cancelled after the close.",
+        ]
+        if a.seq >= MAX_CROSSES:
+            lines.append(f"Cross #{a.seq} today: no more intraday alerts for {symbol} until the close.")
+        lines.append(chart)
+    elif a.kind == AlertKind.UNDONE:
+        lines = [
+            f"↩️ <b>UNDONE · {symbol}</b>",
+            f"The {label.lower()} cross no longer holds at {a.at:%H:%M}",
+            _numbers(a, "Price"),
+        ]
+    elif a.kind == AlertKind.NOT_CONFIRMED:
+        lines = [
+            f"❌ <b>NOT CONFIRMED · {symbol}</b>",
+            f"Today's {label.lower()} cross didn't hold at the close",
+            _numbers(a, "Close"),
+        ]
+    elif a.after_intraday:
+        lines = [f"✅ <b>CONFIRMED · {label} · {symbol}</b>", f"{what}: held at the close", _numbers(a, "Close"), chart]
+    else:  # crossed only at the close: the v1-style alert
+        lines = [f"{icon} <b>{label} · {symbol}</b>", escape(a.name), f"{what} at the close", _numbers(a, "Close"), chart]
+    return "\n".join(lines)
+
+
+_KIND_ORDER = {AlertKind.CONFIRMED: 0, AlertKind.NOT_CONFIRMED: 1, AlertKind.CROSS: 2, AlertKind.UNDONE: 3}
 
 
 def digest(alerts: list[AlertItem], test: bool = False) -> list[str]:
     """One user's alerts as Telegram messages (split to fit the length limit), grouped by trading day."""
-    header = "🧪 <b>Test alert</b> – this is how alerts will look (using each stock's most recent cross)\n\n" if test else ""
+    header = "🧪 <b>Test alert</b> – this is how alerts will look (sample prices from your stocks)\n\n" if test else ""
     blocks = []
-    ordered = sorted(alerts, key=lambda a: (a.trade_date, a.direction != Direction.BULLISH, a.symbol))
-    for trade_date, items in groupby(ordered, key=lambda a: a.trade_date):
-        blocks.append(f"📈 <b>Tradio · {day(trade_date)}</b>")
+    ordered = sorted(alerts, key=lambda a: (a.trade_date, _KIND_ORDER[a.kind], a.direction != Direction.BULLISH, a.symbol))
+    for trade_date, group in groupby(ordered, key=lambda a: a.trade_date):
+        items = list(group)
+        live = [a.at for a in items if a.kind in (AlertKind.CROSS, AlertKind.UNDONE) and a.at]
+        when = f", {max(live):%H:%M} (live)" if live and len(live) == len(items) else ""
+        blocks.append(f"📈 <b>Tradio · {day(trade_date)}{when}</b>")
         blocks.extend(alert_block(a) for a in items)
     blocks.append(DISCLAIMER)
 

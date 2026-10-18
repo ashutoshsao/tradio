@@ -1,4 +1,4 @@
-"""Database schema. See docs/v1-spec.md §5."""
+"""Database schema. See docs/v1-spec.md §5 and docs/v2-spec.md §4."""
 
 import enum
 from datetime import date, datetime
@@ -56,6 +56,13 @@ class DeliveryStatus(enum.StrEnum):
     SENT = "sent"
     FAILED = "failed"
     SKIPPED = "skipped"
+
+
+class AlertKind(enum.StrEnum):
+    CROSS = "cross"  # intraday, provisional
+    UNDONE = "undone"  # intraday: an alerted cross no longer holds
+    CONFIRMED = "confirmed"  # official close
+    NOT_CONFIRMED = "not_confirmed"  # official close: an alerted cross didn't hold
 
 
 class RunStatus(enum.StrEnum):
@@ -166,12 +173,47 @@ class SignalEvent(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
+class IntradaySignal(Base):
+    """A stock's provisional cross during one trading day. See docs/v2-spec.md §4."""
+
+    __tablename__ = "intraday_signals"
+
+    symbol: Mapped[str] = mapped_column(ForeignKey("instruments.symbol"), primary_key=True)
+    trade_date: Mapped[date] = mapped_column(primary_key=True)
+    direction: Mapped[Direction] = mapped_column(_enum(Direction))
+    active: Mapped[bool]  # crossed as of the latest tick
+    crosses: Mapped[int]  # times it crossed today (cross alerts are capped)
+    price: Mapped[Decimal] = mapped_column(Price)
+    sma8: Mapped[Decimal] = mapped_column(Sma)
+    sma13: Mapped[Decimal] = mapped_column(Sma)
+    sma21: Mapped[Decimal] = mapped_column(Sma)
+    updated_at: Mapped[datetime]
+
+
+class Alert(Base):
+    """One user-facing notification about a stock, sent to everyone watching it."""
+
+    __tablename__ = "alerts"
+    __table_args__ = (UniqueConstraint("symbol", "trade_date", "kind", "seq"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    symbol: Mapped[str] = mapped_column(ForeignKey("instruments.symbol"))
+    trade_date: Mapped[date] = mapped_column(index=True)
+    kind: Mapped[AlertKind] = mapped_column(_enum(AlertKind))
+    seq: Mapped[int] = mapped_column(default=0)  # which intraday cross this is about; 0 for the close
+    direction: Mapped[Direction] = mapped_column(_enum(Direction))
+    price: Mapped[Decimal] = mapped_column(Price)
+    sma8: Mapped[Decimal] = mapped_column(Sma)
+    sma13: Mapped[Decimal] = mapped_column(Sma)
+    sma21: Mapped[Decimal] = mapped_column(Sma)
+    after_intraday: Mapped[bool] = mapped_column(default=False)  # confirmed: users already had a cross alert
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
 class Delivery(Base):
     __tablename__ = "deliveries"
 
-    event_id: Mapped[int] = mapped_column(
-        ForeignKey("signal_events.id", ondelete="CASCADE"), primary_key=True
-    )
+    alert_id: Mapped[int] = mapped_column(ForeignKey("alerts.id", ondelete="CASCADE"), primary_key=True)
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.telegram_user_id", ondelete="CASCADE"), primary_key=True
     )
@@ -181,6 +223,15 @@ class Delivery(Base):
     attempts: Mapped[int] = mapped_column(default=0)
     sent_at: Mapped[datetime | None]
     error: Mapped[str | None] = mapped_column(Text)
+
+
+class AdminNotice(Base):
+    """Admin messages that must go out once (e.g. "token expires in 7 days")."""
+
+    __tablename__ = "admin_notices"
+
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
 class Run(Base):

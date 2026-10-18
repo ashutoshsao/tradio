@@ -1,3 +1,4 @@
+import asyncio
 from functools import lru_cache
 
 from sqlalchemy import Engine, create_engine
@@ -13,3 +14,13 @@ def get_engine() -> Engine:
 
 def session() -> Session:
     return sessionmaker(get_engine(), expire_on_commit=False)()
+
+
+async def in_session(fn, *args):
+    """Run a blocking database call off the event loop with its own session."""
+
+    def call():
+        with session() as s:
+            return fn(s, *args)
+
+    return await asyncio.to_thread(call)

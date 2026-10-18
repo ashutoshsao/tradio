@@ -12,10 +12,15 @@ HEADER = (
 )
 
 
+def isin(symbol: str) -> str:
+    """A made-up ISIN, unique per symbol."""
+    return ("INE" + symbol.replace("&", "").replace("-", "").ljust(7, "0"))[:10] + "01"
+
+
 def row(day: date, symbol: str, close: str, prev_close: str | None = None, series: str = "EQ") -> str:
     prev_close = prev_close or close
     return (
-        f"{day},{day},CM,NSE,STK,1,INE000000000,{symbol},{series},,,,,{symbol} LTD,"
+        f"{day},{day},CM,NSE,STK,1,{isin(symbol)},{symbol},{series},,,,,{symbol} LTD,"
         f"{close},{close},{close},{close},{close},{prev_close},,{close},,,1000,1000.00,10,F1,1,,,,,"
     )
 

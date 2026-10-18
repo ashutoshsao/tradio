@@ -7,7 +7,8 @@ import asyncio
 import functools
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta
+from dataclasses import replace
+from datetime import datetime, time, timedelta
 
 from sqlalchemy import func, select
 from telegram import (
@@ -29,13 +30,14 @@ from telegram.ext import (
     filters,
 )
 
-from tradio import daily, messages
+from tradio import daily, intraday, messages
 from tradio import watchlist as wl
-from tradio.config import get_settings
+from tradio.config import IST, get_settings
 from tradio.data.nse import NseArchiveSource
+from tradio.data.upstox import UpstoxSource, token_expiry
 from tradio.db import session
 from tradio.engine import evaluate
-from tradio.models import User, WatchlistEntry
+from tradio.models import AlertKind, User, WatchlistEntry
 
 log = logging.getLogger(__name__)
 
@@ -248,23 +250,51 @@ async def users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await reply(update, messages.users(await db(wl.list_users)))
 
 
-def _test_alerts(s, user_id: int) -> list[wl.AlertItem]:
+def _test_alerts(s, user_id: int) -> list[list[wl.AlertItem]]:
+    """Sample digests built from the watchlist's latest crosses: one during market hours, one after the close."""
     symbols = [st.symbol for st in wl.watchlist(s, user_id)] or ["RELIANCE", "HDFCBANK"]
     evaluate(s, symbols)  # make sure sample stocks have their history computed
     s.commit()
-    return wl.latest_alerts(s, symbols)
+    items = wl.latest_alerts(s, symbols)
+    if not items:
+        return []
+    # Pretend every sample happened on the latest of those days, so they read as one day's alerts.
+    sample_day = max(a.trade_date for a in items)
+    first, *rest = [replace(a, trade_date=sample_day) for a in items]
+    at = lambda hh, mm: datetime.combine(sample_day, time(hh, mm), IST)  # noqa: E731
+    live = [replace(first, kind=AlertKind.CROSS, seq=1, at=at(10, 45))]
+    close = [replace(first, after_intraday=True), *rest]
+    if rest:
+        # A cross that later fails: SMA8 back between the other two, as it would really be.
+        between = replace(rest[0], sma8=(rest[0].sma13 + rest[0].sma21) / 2)
+        live.append(replace(rest[0], kind=AlertKind.CROSS, seq=1, at=at(10, 45)))
+        live.append(replace(between, kind=AlertKind.UNDONE, seq=1, at=at(13, 0)))
+        close[1] = replace(between, kind=AlertKind.NOT_CONFIRMED)
+    return [live, close]
 
 
 @admin_only
 async def test_alert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    for chunk in messages.digest(await db(_test_alerts, update.effective_user.id), test=True):
-        await reply(update, chunk)
+    samples = await db(_test_alerts, update.effective_user.id)
+    if not samples:
+        await reply(update, "No crosses in your stocks' history to build a sample from.")
+        return
+    for title, alerts in zip(["During market hours (every 15 min):", "After the close (~6–7 PM):"], samples):
+        await reply(update, f"<b>{title}</b>")
+        for chunk in messages.digest(alerts, test=True):
+            await reply(update, chunk)
 
 
 def _status(s) -> str:
     latest = wl.latest_trading_day(s)
     watched = s.scalar(select(func.count(func.distinct(WatchlistEntry.symbol))))
-    return f"Latest trading day loaded: {messages.day(latest) if latest else 'none'}\nStocks watched: {watched}"
+    token = get_settings().upstox_analytics_token
+    expiry = token_expiry(token.get_secret_value()) if token else None
+    upstox = f"expires {messages.day(expiry.date())}" if expiry else "not set (no intraday alerts)"
+    return (
+        f"Latest trading day loaded: {messages.day(latest) if latest else 'none'}\n"
+        f"Stocks watched: {watched}\nUpstox token: {upstox}"
+    )
 
 
 @admin_only
@@ -282,22 +312,35 @@ COMMANDS = [
 
 async def _post_init(app: Application) -> None:
     await app.bot.set_my_commands([BotCommand(c, d) for c, d in COMMANDS])
-    # Catch up once at startup (e.g. after the laptop was off), then every 15 minutes;
-    # ticks outside the evening window are skipped.
-    app.job_queue.run_once(_daily_tick, when=5, data={"force": True})
-    now = datetime.now(daily.IST)
+    token = get_settings().upstox_analytics_token
+    if token:
+        app.bot_data["live"] = UpstoxSource(token.get_secret_value())
+        app.bot_data["expiry"] = token_expiry(token.get_secret_value())
+    else:
+        log.warning("UPSTOX_ANALYTICS_TOKEN not set: intraday alerts are off")
+    # Catch up once at startup (e.g. after the laptop was off), then every 15 minutes.
+    # Each tick does whatever is due: intraday checks in market hours, the evening run 18:00-22:00.
+    app.job_queue.run_once(_tick, when=5, data={"force_evening": True})
+    now = datetime.now(IST)
     next_quarter = (now + timedelta(minutes=15 - now.minute % 15)).replace(second=0, microsecond=0)
-    app.job_queue.run_repeating(_daily_tick, interval=timedelta(minutes=15), first=next_quarter)
+    app.job_queue.run_repeating(_tick, interval=timedelta(minutes=15), first=next_quarter)
 
 
-async def _daily_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
-    now = datetime.now(daily.IST)
-    if not (context.job.data or {}).get("force") and not daily.in_window(now):
-        return
-    try:
-        await daily.tick(context.bot, NseArchiveSource(), now, get_settings().admin_telegram_id)
-    except Exception:
-        pass  # logged and reported to the admin inside tick; the next tick retries
+async def _tick(context: ContextTypes.DEFAULT_TYPE) -> None:
+    now = datetime.now(IST)
+    admin_id = get_settings().admin_telegram_id
+    nse = NseArchiveSource()
+    if live := context.bot_data.get("live"):
+        try:
+            await intraday.remind_expiry(context.bot, context.bot_data.get("expiry"), now, admin_id)
+        except Exception:
+            log.exception("token expiry reminder failed")
+        await intraday.tick(context.bot, live, nse, now, admin_id)  # skips itself outside market hours
+    if (context.job.data or {}).get("force_evening") or daily.in_window(now):
+        try:
+            await daily.tick(context.bot, nse, now, admin_id)
+        except Exception:
+            pass  # logged and reported to the admin inside tick; the next tick retries
 
 
 def build_application() -> Application:
