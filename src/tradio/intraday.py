@@ -48,7 +48,10 @@ class Provisional:
 
 
 def in_hours(hours: MarketHours, now: datetime) -> bool:
-    return hours.start + EDGE <= now <= hours.end - EDGE
+    # To the minute: the 15-minute job fires a few milliseconds after the quarter,
+    # and 15:15:00.4 must still count as the 15:15 check.
+    minute = now.replace(second=0, microsecond=0)
+    return hours.start + EDGE <= minute <= hours.end - EDGE
 
 
 def history_is_current(live: LivePriceSource, latest: date | None, today: date) -> bool:

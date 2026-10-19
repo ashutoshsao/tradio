@@ -77,6 +77,19 @@ def test_outside_session_and_first_15_minutes_are_skipped(db):
     assert bot.sent == [] and kinds(db) == []
 
 
+def test_session_window_is_judged_to_the_minute():
+    today = datetime(2026, 10, 19).date()
+    hours = FakeLive({}).market_hours(today)
+
+    def check(hh, mm, ss=0, us=0):
+        return intraday.in_hours(hours, datetime.combine(today, time(hh, mm, ss, us), IST))
+
+    assert not check(9, 29, 59)
+    assert check(9, 30, 0, 400_000)
+    assert check(15, 15, 0, 400_000)  # the job fires a few ms late; still the 15:15 check
+    assert not check(15, 16)
+
+
 def test_flip_flopping_is_capped_at_three_cross_alerts(db):
     today = history(db)
     setup_users(db)
