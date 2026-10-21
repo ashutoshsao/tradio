@@ -20,6 +20,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ParseMode
+from telegram.error import NetworkError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -364,9 +365,17 @@ async def _tick(context: ContextTypes.DEFAULT_TYPE) -> None:
         await intraday.tick(context.bot, live, nse, now, admin_id)  # skips itself outside market hours
     if (context.job.data or {}).get("force_evening") or daily.in_window(now):
         try:
-            await daily.tick(context.bot, nse, now, admin_id)
+            await daily.tick(context.bot, nse, now, admin_id, context.bot_data.get("live"))
         except Exception:
             pass  # logged and reported to the admin inside tick; the next tick retries
+
+
+async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Telegram's servers return the odd 502 or timeout; polling retries by itself, so one line is enough.
+    if isinstance(context.error, NetworkError):
+        log.warning("Telegram network error (retried automatically): %s", context.error)
+    else:
+        log.error("unhandled error", exc_info=context.error)
 
 
 def build_application() -> Application:
@@ -374,6 +383,7 @@ def build_application() -> Application:
     if token is None:
         raise SystemExit("TELEGRAM_BOT_TOKEN is not set (see .env.example)")
     app = Application.builder().token(token.get_secret_value()).post_init(_post_init).build()
+    app.add_error_handler(_on_error)
     # Picking an inline result sends "/add SYMBOL" via the bot; catch it before the command handlers.
     app.add_handler(MessageHandler(filters.VIA_BOT & filters.Regex(r"^/add\s"), add_from_inline))
     for name, handler in [

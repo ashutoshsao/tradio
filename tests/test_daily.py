@@ -132,3 +132,53 @@ def test_revoked_user_gets_nothing(db):
 
     asyncio.run(daily.tick(bot, FakeSource({today: {"TCS": "120", "INFY": "100"}}), at(today), ADMIN))
     assert [chat for chat, _ in bot.sent] == [ADMIN]
+
+
+class ClosedOn:
+    """Upstox stand-in for the end-of-evening check: NSE closed on the given days only."""
+
+    def __init__(self, *days):
+        self.days = set(days)
+
+    def market_hours(self, day):
+        return None if day in self.days else object()
+
+
+def weekday_after(day):
+    return day if day.weekday() < 5 else day + timedelta(days=7 - day.weekday())
+
+
+def test_10pm_tick_counts_even_when_the_job_fires_late(db):
+    today = weekday_after(history(db))
+    setup_users(db)
+    bot = FakeBot()
+    late = at(today, 22, 0).replace(microsecond=400_000)
+
+    assert daily.in_window(late)
+    asyncio.run(daily.tick(bot, FakeSource({}), late, ADMIN))
+    assert [chat for chat, _ in bot.sent] == [ADMIN]
+    assert db.get(Run, today).status == RunStatus.NO_DATA
+
+
+def test_holiday_and_weekend_close_quietly(db):
+    holiday = weekday_after(history(db))
+    setup_users(db)
+    bot = FakeBot()
+
+    asyncio.run(daily.tick(bot, FakeSource({}), at(holiday, 22, 0), ADMIN, live=ClosedOn(holiday)))
+    saturday = holiday + timedelta(days=5 - holiday.weekday())
+    asyncio.run(daily.tick(bot, FakeSource({}), at(saturday, 22, 0), ADMIN))  # no Upstox: weekends are closed
+
+    assert bot.sent == []
+    assert db.get(Run, holiday).status == RunStatus.CLOSED
+    assert db.get(Run, saturday).status == RunStatus.CLOSED
+
+
+def test_weekend_special_session_without_a_file_is_reported(db):
+    history(db)
+    setup_users(db)
+    bot = FakeBot()
+    budget_sunday = date(2026, 2, 1)
+
+    asyncio.run(daily.tick(bot, FakeSource({}), at(budget_sunday, 22, 0), ADMIN, live=ClosedOn()))
+    assert [chat for chat, _ in bot.sent] == [ADMIN]

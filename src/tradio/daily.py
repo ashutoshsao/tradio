@@ -4,6 +4,7 @@ See docs/v1-spec.md §6 and docs/v2-spec.md §4. Every tick is idempotent, so it
 can run every 15 minutes from the bot's job queue or as a Kubernetes CronJob.
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -17,6 +18,7 @@ from tradio import messages
 from tradio.alerts import add_alert, queue_deliveries, send_pending, watched_symbols
 from tradio.config import IST
 from tradio.data.base import MarketDataSource
+from tradio.data.upstox import LivePriceSource
 from tradio.db import in_session
 from tradio.engine import evaluate
 from tradio.ingest import ingest_day, sync_actions_api
@@ -135,7 +137,9 @@ def _run_and_alert(session: Session, source: MarketDataSource, today: date) -> t
     return result
 
 
-async def tick(bot: Bot, source: MarketDataSource, now: datetime, admin_id: int | None) -> TickResult:
+async def tick(
+    bot: Bot, source: MarketDataSource, now: datetime, admin_id: int | None, live: LivePriceSource | None = None
+) -> TickResult:
     today = now.astimezone(IST).date()
     try:
         new_days, events, queued = await in_session(_run_and_alert, source, today)
@@ -147,9 +151,12 @@ async def tick(bot: Bot, source: MarketDataSource, now: datetime, admin_id: int 
     sent, failed = await send_pending(bot)
     result = TickResult(new_days, events, queued, sent, failed)
 
-    # Last tick of the evening on a weekday and still no file: tell the admin once.
-    if now.astimezone(IST).time() >= WINDOW_END and today.weekday() < 5 and admin_id:
-        if await in_session(_run_status, today) == RunStatus.RUNNING:
+    # Last tick of the evening and still no file: a closed market is recorded quietly,
+    # a trading day without a file is told to the admin once.
+    if _minute(now) >= WINDOW_END and await in_session(_run_status, today) == RunStatus.RUNNING:
+        if await asyncio.to_thread(market_closed, live, today):
+            await in_session(finish_run, today, RunStatus.CLOSED)
+        elif admin_id:
             await in_session(finish_run, today, RunStatus.NO_DATA)
             await bot.send_message(admin_id, messages.no_data(today), parse_mode=ParseMode.HTML)
             result.no_data_alert = True
@@ -162,5 +169,20 @@ def _run_status(session: Session, day: date) -> RunStatus | None:
     return run.status if run else None
 
 
+def market_closed(live: LivePriceSource | None, day: date) -> bool:
+    """Upstox's calendar if available (knows holidays and weekend special sessions), else weekends."""
+    if live is not None:
+        try:
+            return live.market_hours(day) is None
+        except Exception:
+            log.warning("Upstox market hours unavailable for %s; assuming weekdays trade", day, exc_info=True)
+    return day.weekday() >= 5
+
+
+def _minute(now: datetime) -> time:
+    # To the minute: the 15-minute job fires a few milliseconds late, and 22:00:00.4 is the 22:00 tick.
+    return now.astimezone(IST).replace(second=0, microsecond=0).time()
+
+
 def in_window(now: datetime) -> bool:
-    return WINDOW_START <= now.astimezone(IST).time() <= WINDOW_END
+    return WINDOW_START <= _minute(now) <= WINDOW_END

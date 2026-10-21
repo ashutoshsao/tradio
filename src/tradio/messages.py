@@ -68,8 +68,8 @@ def status_line(s: StockStatus, today: date | None = None) -> str:
 
 def no_data(d: date) -> str:
     return (
-        f"⚠️ No NSE bhavcopy for {day(d)} by 10 PM IST. Probably a market holiday; "
-        "if not, NSE is late and the next run will pick it up."
+        f"⚠️ No NSE bhavcopy for {day(d)} by 10 PM IST, though NSE was open that day. "
+        "NSE is probably late; it's loaded before tomorrow's first intraday check."
     )
 
 

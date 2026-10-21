@@ -68,7 +68,8 @@ class AlertKind(enum.StrEnum):
 class RunStatus(enum.StrEnum):
     RUNNING = "running"
     DONE = "done"
-    NO_DATA = "no_data"
+    NO_DATA = "no_data"  # a trading day, but no file by the end of the evening
+    CLOSED = "closed"  # NSE was closed (weekend or holiday): no file expected
     FAILED = "failed"
 
 
