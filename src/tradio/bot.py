@@ -364,9 +364,11 @@ async def _heartbeat(context: ContextTypes.DEFAULT_TYPE) -> None:
     when these pings stop: the pod crashed, the node is down, or the event loop hung (the job runs on it too)."""
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            await client.get(context.job.data)
+            r = await client.get(context.job.data)
+            r.raise_for_status()  # a 404 (wrong key or slug) records no ping: say so instead of passing silently
     except httpx.HTTPError as e:  # the monitor notices if this keeps failing; nothing else to do here
-        log.warning("heartbeat failed: %s", type(e).__name__)
+        status = f" {e.response.status_code}" if isinstance(e, httpx.HTTPStatusError) else ""
+        log.warning("heartbeat failed: %s%s", type(e).__name__, status)
 
 
 async def _tick(context: ContextTypes.DEFAULT_TYPE) -> None:

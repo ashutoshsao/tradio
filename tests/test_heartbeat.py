@@ -24,3 +24,11 @@ def test_heartbeat_pings_the_monitor_and_a_failure_only_logs(monkeypatch):
     monkeypatch.setattr(bot.httpx, "AsyncClient", client(fail=True))
     asyncio.run(bot._heartbeat(context))  # doesn't raise: the job queue keeps running
     assert seen == ["https://hc-ping.com/abc"] * 2
+
+
+def test_heartbeat_logs_a_404(monkeypatch, caplog):
+    real = httpx.AsyncClient
+    monkeypatch.setattr(bot.httpx, "AsyncClient",
+                        lambda **kw: real(transport=httpx.MockTransport(lambda r: httpx.Response(404, text="not found")), **kw))
+    asyncio.run(bot._heartbeat(SimpleNamespace(job=SimpleNamespace(data="https://hc-ping.com/key/tradio"))))
+    assert "heartbeat failed: HTTPStatusError 404" in caplog.text
