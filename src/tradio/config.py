@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     admin_telegram_id: int | None = None
     # v2 intraday alerts; without it only the evening run works.
     upstox_analytics_token: SecretStr | None = None
+    # Healthchecks.io ping URL: the bot pings it every 5 minutes and the monitor alerts when pings stop.
+    heartbeat_url: SecretStr | None = None
 
 
 @lru_cache

@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime, time, timedelta
 
+import httpx
 from sqlalchemy import func, select
 from telegram import (
     BotCommand,
@@ -351,6 +352,21 @@ async def _post_init(app: Application) -> None:
     now = datetime.now(IST)
     next_quarter = (now + timedelta(minutes=15 - now.minute % 15)).replace(second=0, microsecond=0)
     app.job_queue.run_repeating(_tick, interval=timedelta(minutes=15), first=next_quarter)
+    if url := get_settings().heartbeat_url:
+        app.job_queue.run_repeating(_heartbeat, interval=HEARTBEAT_EVERY, first=10, data=url.get_secret_value())
+
+
+HEARTBEAT_EVERY = timedelta(minutes=5)
+
+
+async def _heartbeat(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """There's no HTTP server for a probe, so the bot says it's alive: an outside monitor (Healthchecks.io) alerts
+    when these pings stop: the pod crashed, the node is down, or the event loop hung (the job runs on it too)."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.get(context.job.data)
+    except httpx.HTTPError as e:  # the monitor notices if this keeps failing; nothing else to do here
+        log.warning("heartbeat failed: %s", type(e).__name__)
 
 
 async def _tick(context: ContextTypes.DEFAULT_TYPE) -> None:
