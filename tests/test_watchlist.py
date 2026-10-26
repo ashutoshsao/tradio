@@ -105,7 +105,7 @@ def test_messages_render(db):
     result = wl.add_symbols(db, ADMIN, ["M&M", "NOPE"])
 
     text = messages.add_result(result, wl.latest_trading_day(db))
-    assert "<b>M&amp;M</b> – 🟢 SMA8 above both (as of 30 Jan 2026)" in text  # HTML-escaped
+    assert "<b>M&amp;M</b> · daily – 🟢 SMA8 above both (as of 30 Jan 2026)" in text  # HTML-escaped
     assert "Last cross: 🟢 bullish on 26 Jan 2026" in text
     assert "<b>NOPE</b> isn't an NSE stock" in text
     assert messages.watchlist([], None).startswith("You're not watching anything")
@@ -144,7 +144,7 @@ def test_digest_format_and_split():
     (text,) = messages.digest([item("TCS", d2, Direction.BEARISH), item("M&M", d2), item("INFY", d1)])
     assert text.index("15 Oct</b> · close") < text.index("INFY") < text.index("16 Oct</b> · close") < text.index("M&amp;M") < text.index("TCS")
     assert "🔴 <b>TCS · bearish cross at the close</b>" in text
-    assert 'symbol=NSE%3AM_M"' in text
+    assert 'symbol=NSE%3AM_M&amp;interval=D"' in text
     assert text.endswith(messages.DISCLAIMER)
 
     chunks = messages.digest([item(f"S{i}", d2) for i in range(60)])

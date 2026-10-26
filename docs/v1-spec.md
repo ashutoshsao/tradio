@@ -1,5 +1,7 @@
 # Tradio v1 — Spec
 
+> Historical specification. See [v3](v3-spec.md) for the current completed 15-minute candle strategy and cluster deployment.
+
 Telegram alerts when a watched NSE stock's daily SMA8 flips to above both SMA13 and SMA21 (bullish) or below both (bearish).
 
 ## 1. Decisions

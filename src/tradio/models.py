@@ -59,6 +59,7 @@ class DeliveryStatus(enum.StrEnum):
 
 
 class AlertKind(enum.StrEnum):
+    CANDLE = "candle"  # confirmed 15-minute candle crossover
     CROSS = "cross"  # intraday, provisional
     UNDONE = "undone"  # intraday: an alerted cross no longer holds
     CONFIRMED = "confirmed"  # official close
@@ -191,6 +192,23 @@ class IntradaySignal(Base):
     updated_at: Mapped[datetime]
 
 
+class CandlePrice(Base):
+    """Raw completed 15-minute closes; retained across pod restarts."""
+
+    __tablename__ = "candle_prices"
+    symbol: Mapped[str] = mapped_column(ForeignKey("instruments.symbol"), primary_key=True)
+    start: Mapped[datetime] = mapped_column(primary_key=True)
+    close: Mapped[Decimal] = mapped_column(Price)
+
+
+class CandleProgress(Base):
+    __tablename__ = "candle_progress"
+    symbol: Mapped[str] = mapped_column(ForeignKey("instruments.symbol"), primary_key=True)
+    last_candle: Mapped[datetime | None]
+    last_direction: Mapped[Direction | None] = mapped_column(_enum(Direction))
+    history_through: Mapped[date | None]
+
+
 class Alert(Base):
     """One user-facing notification about a stock, sent to everyone watching it."""
 
@@ -208,6 +226,7 @@ class Alert(Base):
     sma13: Mapped[Decimal] = mapped_column(Sma)
     sma21: Mapped[Decimal] = mapped_column(Sma)
     after_intraday: Mapped[bool] = mapped_column(default=False)  # confirmed: users already had a cross alert
+    candle_start: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 

@@ -72,3 +72,26 @@ def test_token_expiry_reads_the_jwt_claim():
     claims = base64.urlsafe_b64encode(json.dumps({"exp": 1823896800}).encode()).decode().rstrip("=")
     assert token_expiry(f"header.{claims}.signature") == datetime(2027, 10, 19, 3, 30, tzinfo=IST)
     assert token_expiry("not-a-jwt") is None
+
+
+def test_candles_use_v3_15_minute_endpoints_and_sort_deduplicate():
+    rows = [
+        ["2026-10-23T09:30:00+05:30", 1, 2, 1, 120, 10, 0],
+        ["2026-10-23T09:15:00+05:30", 1, 2, 1, 100.25, 10, 0],
+        ["2026-10-23T09:30:00+05:30", 1, 2, 1, 120, 10, 0],
+    ]
+    upstox, seen = source(lambda request: ok({"candles": rows}))
+    candles = upstox.candles("INE002A01018", date(2026, 10, 23))
+    assert len(candles) == 2
+    assert candles[0].close == Decimal("100.25")
+    assert candles[0].start == datetime(2026, 10, 23, 9, 15, tzinfo=IST)
+    assert seen[0].url.path == "/v3/historical-candle/intraday/NSE_EQ|INE002A01018/minutes/15"
+    assert "%7C" in str(seen[0].url)
+    upstox.candles("INE002A01018", date(2026, 10, 23), date(2026, 10, 1))
+    assert seen[1].url.path == "/v3/historical-candle/NSE_EQ|INE002A01018/minutes/15/2026-10-23/2026-10-01"
+
+
+def test_candles_reject_missing_timezone():
+    upstox, _ = source(lambda request: ok({"candles": [["2026-10-23T09:15:00", 1, 2, 1, 100, 10, 0]]}))
+    with pytest.raises(UpstoxError, match="timezone"):
+        upstox.candles("INE002A01018", date(2026, 10, 23))

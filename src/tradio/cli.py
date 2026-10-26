@@ -102,14 +102,17 @@ def run_intraday(args: argparse.Namespace) -> None:
         with session() as s:
             if not intraday.history_is_current(live, latest_trading_day(s), now.date()):
                 raise SystemExit("Price history is behind (missed evening run); run `tradio run-daily` first.")
-            results = intraday.evaluate_live(s, live, now.date())
-        print(f"Live provisional state at {now:%Y-%m-%d %H:%M} (nothing stored or sent):")
-        for p in results:
+            results = intraday.evaluate_live(s, live, now, store=False)
+        print(f"Completed 15-minute candle states at {now:%Y-%m-%d %H:%M:%S} IST (nothing stored or sent):")
+        for symbol, points in results:
+            if not points:
+                print(f"  {symbol:<12} warming up: needs 21 continuous completed candles")
+                continue
+            p = points[-1]
             cross = f"  CROSS {p.direction.upper()}" if p.direction else ""
-            action = f"  (history x{p.factor:.4f}: corporate action today)" if p.factor != 1 else ""
             print(
-                f"  {p.symbol:<12} {p.point.close:>10,.2f}  SMA8 {p.point.sma8:,.2f}  SMA13 {p.point.sma13:,.2f}"
-                f"  SMA21 {p.point.sma21:,.2f}  {p.point.state}{cross}{action}"
+                f"  {symbol:<12} candle {p.start:%Y-%m-%d %H:%M}  {p.close:>10,.2f}"
+                f"  SMA8 {p.sma8:,.2f}  SMA13 {p.sma13:,.2f}  SMA21 {p.sma21:,.2f}  {p.state}{cross}"
             )
         return
 
@@ -119,7 +122,7 @@ def run_intraday(args: argparse.Namespace) -> None:
     async def go():
         async with Bot(settings.telegram_bot_token.get_secret_value()) as tg:
             ids = await intraday.tick(tg, live, NseArchiveSource(), now, settings.admin_telegram_id)
-            print("market closed or not yet 15 min after the open: skipped" if ids is None else f"{len(ids)} new alerts")
+            print("outside completed-candle window or check failed: skipped" if ids is None else f"{len(ids)} new alerts")
 
     asyncio.run(go())
 
@@ -158,8 +161,8 @@ def main() -> None:
     sub.add_parser("bot", help="run the Telegram bot (includes the intraday and evening runs)").set_defaults(func=bot)
     sub.add_parser("run-daily", help="one evening-run tick: load data, find crosses, send alerts").set_defaults(func=run_daily)
 
-    it = sub.add_parser("intraday", help="one intraday tick now: live prices, provisional crosses, alerts")
-    it.add_argument("--dry-run", action="store_true", help="print each watched stock's live state; store and send nothing")
+    it = sub.add_parser("intraday", help="one completed 15-minute candle check")
+    it.add_argument("--dry-run", action="store_true", help="print completed-candle states; store and send nothing")
     it.set_defaults(func=run_intraday)
 
     args = parser.parse_args()

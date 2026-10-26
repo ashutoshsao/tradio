@@ -135,6 +135,7 @@ class AlertItem:
     seq: int = 0  # which intraday cross of the day
     after_intraday: bool = False  # confirmed: users already had a provisional alert
     at: datetime | None = None
+    candle_start: datetime | None = None
 
 
 def latest_alerts(session: Session, symbols: list[str]) -> list[AlertItem]:

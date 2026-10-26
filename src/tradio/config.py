@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     # Optional until the bot milestone; data and signal commands don't need them.
     telegram_bot_token: SecretStr | None = None
     admin_telegram_id: int | None = None
-    # v2 intraday alerts; without it only the evening run works.
+    # Completed 15-minute candle alerts; without it only daily close alerts work.
     upstox_analytics_token: SecretStr | None = None
     # Healthchecks.io ping URL: the bot pings it every 5 minutes and the monitor alerts when pings stop.
     heartbeat_url: SecretStr | None = None

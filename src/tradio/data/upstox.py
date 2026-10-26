@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Protocol
+from urllib.parse import quote as urlquote
 
 import httpx
 
@@ -40,7 +41,17 @@ class MarketHours:
     end: datetime
 
 
+@dataclass(frozen=True)
+class Candle:
+    start: datetime
+    close: Decimal
+
+
 class LivePriceSource(Protocol):
+    def candles(self, isin: str, day: date, start: date | None = None) -> list[Candle]:
+        """15-minute closes: today's intraday endpoint, or historical start..day."""
+        ...
+
     def quotes(self, isins: list[str]) -> dict[str, Quote]:
         """Live quotes by ISIN. Stocks Upstox doesn't know are left out."""
         ...
@@ -60,6 +71,22 @@ class UpstoxSource:
         self.retries = retries
         self.backoff = backoff
         self._hours: dict[date, MarketHours | None] = {}
+
+    def candles(self, isin: str, day: date, start: date | None = None) -> list[Candle]:
+        key = urlquote(f"NSE_EQ|{isin}", safe="")
+        path = (f"/v3/historical-candle/{key}/minutes/15/{day}/{start}" if start is not None
+                else f"/v3/historical-candle/intraday/{key}/minutes/15")
+        candles = {}
+        for row in self._get(path)["candles"]:
+            stamp = datetime.fromisoformat(row[0])
+            if stamp.tzinfo is None:
+                raise UpstoxError("candle timestamp has no timezone")
+            close = Decimal(str(row[4]))
+            if not close.is_finite() or close <= 0:
+                raise UpstoxError("invalid candle close")
+            stamp = stamp.astimezone(IST)
+            candles[stamp] = Candle(stamp, close)
+        return sorted(candles.values(), key=lambda c: c.start)
 
     def quotes(self, isins: list[str]) -> dict[str, Quote]:
         result = {}

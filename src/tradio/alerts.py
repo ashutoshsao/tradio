@@ -66,6 +66,7 @@ def alert_item(a: Alert, name: str) -> AlertItem:
     return AlertItem(
         a.symbol, name, a.trade_date, a.direction, a.price, a.sma8, a.sma13, a.sma21,
         kind=a.kind, seq=a.seq, after_intraday=a.after_intraday, at=a.created_at.astimezone(IST),
+        candle_start=a.candle_start.astimezone(IST) if a.candle_start else None,
     )
 
 

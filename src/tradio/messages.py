@@ -1,6 +1,6 @@
 """Telegram message text (HTML). Pure functions."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from html import escape
 from itertools import groupby
@@ -13,9 +13,11 @@ from tradio.watchlist import AddResult, AlertItem, StockStatus
 
 DISCLAIMER = "<i>Not investment advice.</i>"
 
-HELP = f"""<b>Tradio</b> alerts you when a stock's daily SMA8 crosses above both SMA13 and SMA21 (bullish) or below both (bearish).
+HELP = f"""<b>Tradio</b> alerts you when SMA8 crosses above both SMA13 and SMA21 (bullish) or below both (bearish).
 
-During market hours it checks every 15 minutes, using the live price as today's close, and alerts as soon as a cross appears (<i>provisional</i>; at most {MAX_CROSSES} per stock a day). After NSE publishes the official close (~6–7 PM IST) you get the verdict: ✅ confirmed or ❌ not confirmed.
+During market hours it checks completed <b>15-minute candles</b>, five seconds after each candle closes (normally 09:30:05–15:30:05 IST). SMA8 averages 8 candle closes; SMA13 and SMA21 average 13 and 21. These signals are confirmed at candle close; a later reversal is a new signal. Directions alternate, with no daily alert cap.
+
+Separate <b>daily</b> crossover alerts arrive after NSE publishes the official daily close (~6–7 PM IST). /list shows daily states. Daily and 15-minute signals can differ.
 
 Just type part of a company name (e.g. <code>hdfc</code> or <code>tata motors</code>) and tap a result to watch it.
 Or type <code>@TradioxBot hdf…</code> for live suggestions as you type.
@@ -52,7 +54,7 @@ def price(value: Decimal) -> str:
 
 
 def status_line(s: StockStatus, today: date | None = None) -> str:
-    head = f"<b>{escape(s.symbol)}</b>"
+    head = f"<b>{escape(s.symbol)}</b> · daily"
     if s.last_seen and today and s.last_seen < today:
         return f"{head} – no NSE data since {day(s.last_seen)}"
     if s.state is None:
@@ -179,13 +181,22 @@ def _smas(a: AlertItem) -> str:
 
 
 def _chart(a: AlertItem) -> str:
-    return f'<a href="{chart_url(a.symbol)}">Chart ↗</a>'
+    interval = "15" if a.kind == AlertKind.CANDLE else "D"
+    return f'<a href="{chart_url(a.symbol)}&amp;interval={interval}">Chart ↗</a>'
 
 
 def alert_block(a: AlertItem) -> str:
     """One stock's alert: a headline that carries the meaning, then price, chart and the three SMAs."""
     symbol, cross = escape(a.symbol), f"{a.direction.value} cross"
-    if a.kind == AlertKind.CROSS:
+    if a.kind == AlertKind.CANDLE:
+        end = a.candle_start + timedelta(minutes=15)
+        return "\n".join([
+            f"{_ICON[a.direction]} <b>{symbol} · {cross} · 15m</b>",
+            escape(a.name),
+            f"Candle {a.candle_start:%H:%M}–{end:%H:%M} IST · closed {clock(end)}",
+            f"Close ₹{price(a.price)} · {_chart(a)}", _smas(a),
+        ])
+    elif a.kind == AlertKind.CROSS:
         lines = [
             f"{_ICON[a.direction]} <b>{symbol} · {cross}</b>",
             escape(a.name),
@@ -210,10 +221,11 @@ def alert_block(a: AlertItem) -> str:
             f"Close ₹{price(a.price)} · {_chart(a)}",
             _smas(a),
         ]
+    lines[0] += " · daily"
     return "\n".join(lines)
 
 
-_KIND_ORDER = {AlertKind.CONFIRMED: 0, AlertKind.NOT_CONFIRMED: 1, AlertKind.CROSS: 2, AlertKind.UNDONE: 3}
+_KIND_ORDER = {AlertKind.CONFIRMED: 0, AlertKind.NOT_CONFIRMED: 1, AlertKind.CROSS: 2, AlertKind.UNDONE: 3, AlertKind.CANDLE: 4}
 _LIVE = (AlertKind.CROSS, AlertKind.UNDONE)
 
 
@@ -222,7 +234,9 @@ def _day_header(trade_date: date, items: list[AlertItem]) -> str:
     header = f"📈 <b>Tradio · {trade_date.day} {trade_date:%b}</b>"
     if live and len(live) == len(items):
         header += f" · {clock(max(a.at for a in live))} · live"
-    elif not live:
+    elif all(a.kind == AlertKind.CANDLE for a in items):
+        header += " · 15m · completed candles"
+    elif not live and not any(a.kind == AlertKind.CANDLE for a in items):
         header += " · close"
     if live:
         header += "\n⏳ <i>Provisional: final verdict after the close</i>"
@@ -233,7 +247,7 @@ def digest(alerts: list[AlertItem], test_title: str | None = None) -> list[str]:
     """One user's alerts as Telegram messages (split to fit the length limit), grouped by trading day."""
     header = f"🧪 <b>Test · {test_title}</b>\n" if test_title else ""
     blocks = []
-    ordered = sorted(alerts, key=lambda a: (a.trade_date, _KIND_ORDER[a.kind], a.direction != Direction.BULLISH, a.symbol))
+    ordered = sorted(alerts, key=lambda a: (a.trade_date, _KIND_ORDER[a.kind], a.seq if a.kind == AlertKind.CANDLE else 0, a.direction != Direction.BULLISH, a.symbol))
     for trade_date, group in groupby(ordered, key=lambda a: a.trade_date):
         items = list(group)
         blocks.append(_day_header(trade_date, items))

@@ -280,7 +280,7 @@ async def users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def _test_alerts(s, user_id: int) -> list[list[wl.AlertItem]]:
-    """Sample digests built from the watchlist's latest crosses: one during market hours, one after the close."""
+    """Formatting previews using daily sample values, with explicit timeframe labels."""
     symbols = [st.symbol for st in wl.watchlist(s, user_id)] or ["RELIANCE", "HDFCBANK"]
     evaluate(s, symbols)  # make sure sample stocks have their history computed
     s.commit()
@@ -291,14 +291,9 @@ def _test_alerts(s, user_id: int) -> list[list[wl.AlertItem]]:
     sample_day = max(a.trade_date for a in items)
     first, *rest = [replace(a, trade_date=sample_day) for a in items]
     at = lambda hh, mm: datetime.combine(sample_day, time(hh, mm), IST)  # noqa: E731
-    live = [replace(first, kind=AlertKind.CROSS, seq=1, at=at(10, 45))]
-    close = [replace(first, after_intraday=True), *rest]
-    if rest:
-        # A cross that later fails: SMA8 back between the other two, as it would really be.
-        between = replace(rest[0], sma8=(rest[0].sma13 + rest[0].sma21) / 2)
-        live.append(replace(rest[0], kind=AlertKind.CROSS, seq=1, at=at(10, 45)))
-        live.append(replace(between, kind=AlertKind.UNDONE, seq=1, at=at(13, 0)))
-        close[1] = replace(between, kind=AlertKind.NOT_CONFIRMED)
+    live = [replace(a, kind=AlertKind.CANDLE, seq=630, candle_start=at(10, 30), at=at(10, 45))
+            for a in [first, *rest]]
+    close = [first, *rest]
     return [live, close]
 
 
@@ -308,7 +303,7 @@ async def test_alert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not samples:
         await reply(update, "No crosses in your stocks' history to build a sample from.")
         return
-    for title, alerts in zip(["during market hours", "after the close"], samples):
+    for title, alerts in zip(["15-minute candles (sample values)", "daily close"], samples):
         for chunk in messages.digest(alerts, test_title=title):
             await reply(update, chunk)
 
@@ -349,14 +344,32 @@ async def _post_init(app: Application) -> None:
     # Catch up once at startup (e.g. after the laptop was off), then every 15 minutes.
     # Each tick does whatever is due: intraday checks in market hours, the evening run 18:00-22:00.
     app.job_queue.run_once(_tick, when=5, data={"force_evening": True})
-    now = datetime.now(IST)
-    next_quarter = (now + timedelta(minutes=15 - now.minute % 15)).replace(second=0, microsecond=0)
-    app.job_queue.run_repeating(_tick, interval=timedelta(minutes=15), first=next_quarter)
+    await _schedule_next_tick(app)
     if url := get_settings().heartbeat_url:
         app.job_queue.run_repeating(_heartbeat, interval=HEARTBEAT_EVERY, first=10, data=url.get_secret_value())
 
 
 HEARTBEAT_EVERY = timedelta(minutes=5)
+
+
+async def _schedule_next_tick(app: Application) -> None:
+    now = datetime.now(IST)
+    hours = None
+    if live := app.bot_data.get("live"):
+        try:
+            hours = await asyncio.to_thread(live.market_hours, now.date())
+        except Exception:
+            log.exception("session timings unavailable; retrying at next quarter-hour")
+    # Timings lookup/retries may have crossed a candle boundary. Never enqueue a
+    # job in the past: APScheduler could discard it and stop the recurring loop.
+    app.job_queue.run_once(_scheduled_tick, when=intraday.next_check(datetime.now(IST), hours))
+
+
+async def _scheduled_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        await _tick(context)
+    finally:
+        await _schedule_next_tick(context.application)
 
 
 async def _heartbeat(context: ContextTypes.DEFAULT_TYPE) -> None:

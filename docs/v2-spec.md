@@ -1,5 +1,7 @@
 # Tradio v2 — Spec (changes from v1)
 
+> Historical specification. See [v3](v3-spec.md) for the current completed 15-minute candle strategy and cluster deployment.
+
 v2 sends the same daily SMA 8/13/21 cross during market hours instead of after the close. Everything in [v1-spec.md](v1-spec.md) still applies unless changed here.
 
 ## 1. Decisions

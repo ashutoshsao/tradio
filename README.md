@@ -1,6 +1,6 @@
 # Tradio
 
-Telegram alerts when a watched NSE stock's daily SMA8 moves above both SMA13 and SMA21 (bullish) or below both (bearish): provisionally during market hours, then confirmed at the close. The design is in [docs/v1-spec.md](docs/v1-spec.md) and the intraday changes in [docs/v2-spec.md](docs/v2-spec.md).
+Telegram alerts when a watched NSE stock's SMA8 crosses above both SMA13 and SMA21 (bullish) or below both (bearish). During market hours, signals use completed **15-minute candles**, checked five seconds after each candle closes. Separate **daily** signals use NSE's official daily closes. See [the current v3 specification](docs/v3-spec.md); [v1](docs/v1-spec.md) and [v2](docs/v2-spec.md) document earlier behaviour.
 
 ## Setup
 
@@ -17,8 +17,8 @@ uv run pytest
 
 ```sh
 uv run tradio backfill               # once: 2 years of NSE prices
-caffeinate -i uv run tradio bot      # bot + intraday checks (market hours) + evening run
-uv run tradio intraday --dry-run     # during market hours: each watched stock's live state, nothing sent
+uv run tradio bot                    # local development only; never alongside the cluster bot
+uv run tradio intraday --dry-run     # completed 15-minute candle states; nothing stored or sent
 ```
 
 `UPSTOX_ANALYTICS_TOKEN` in `.env` turns on intraday alerts; without it only the evening run works.
@@ -33,3 +33,7 @@ uv run tradio db upgrade
 ```
 
 `tests/test_migrations.py` fails if the models and migrations drift apart.
+
+## Production
+
+The bot runs in Kubernetes (`tradio-app`, deployment `bot`), with one replica and `Recreate`. The scheduler runs inside the pod; progress survives restarts in Postgres. Images and migration Jobs are managed in `~/projects/ops/tradio-app-k8s/`. Apply the database migration before rolling out the new bot image. See [v3 deployment and rollback notes](docs/v3-spec.md#commands-and-deployment).
